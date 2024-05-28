@@ -1,7 +1,9 @@
-#version 410
-varying vec3 color;
+#version 400
 
-void main()
+in vec3 color;
+out vec4 frag_colour;
+
+void main() 
 {
-    gl_FragColor = vec4(color, 1.0);
+    frag_colour = vec4(color, 1.0);
 };
