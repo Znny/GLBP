@@ -23,6 +23,7 @@ ShaderProgram::ShaderProgram(const char* name)
 
 void ShaderProgram::Attach(ShaderObject* Object)
 {
+    fprintf(stdout, "attaching shader %s\n", Object->Filename);
     glAttachShader(ProgramID, Object->ObjectID);
     AttachedShaderObjects.push_back(Object);
 }

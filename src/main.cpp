@@ -15,6 +15,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "ShaderProgram.h"
+//#include "matrix_clip_space.hpp"
+#include <glm/gtc/matrix_transform.hpp>
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -39,6 +41,12 @@ void Cleanup();
 //main window for the sim
 GLFWwindow* MainWindow = nullptr;
 
+constexpr int DefaultWidth = 1920;
+constexpr int DefaultHeight = 1080;
+
+static int Width = DefaultWidth;
+static int Height = DefaultHeight;
+
 //camera
 
 //projection matrix, representing how objects in space are projected onto the screen
@@ -49,6 +57,16 @@ glm::mat4x4 ViewMatrix;
 
 //vp matrix, needs to be updated when the projection matrix or view matrix changes
 glm::mat4x4 ViewProjectionMatrix;
+
+
+//view distance from the center
+double ViewDistance = 10.0;
+
+glm::vec3 EyeLocation;
+glm::vec3 UpDirection(0.0, 1.0, 0.0);
+
+//rotation speed in radians/s
+double RotationSpeed = 10.0f;
 
 //timing
 static double LastFrameTime = 0;
@@ -89,9 +107,6 @@ GLuint VertexBufferObject_Colors;
 GLuint VertexArrayObject;
 
 //shader objects
-//GLuint PassthroughVertexShader;
-//GLuint PassthroughFragmentShader;
-//GLuint PassthroughShaderProgram;
 ShaderProgram* PassthroughShaderProgram;
 ShaderObject* PassthroughVertexShader;
 ShaderObject* PassthroughFragmentShader;
@@ -152,8 +167,6 @@ bool InitGraphics()
     //enable anti-aliasing?
     //glfwWindowHint(GLFW_SAMPLES, 4);
 
-    constexpr int Width = 1920;
-    constexpr int Height = 1080;
     const char* Title = "GLBP";
 
     //attempt to create the window
@@ -189,7 +202,6 @@ bool InitGraphics()
     glEnable(GL_DEPTH_TEST); // enable depth-testing
     glDepthFunc(GL_LESS); // depth-testing interprets a smaller value as "closer"
 
-
     //create shader objects
     PassthroughShaderProgram = new ShaderProgram();
     PassthroughVertexShader = new ShaderObject("resource/passthrough.vs", GL_VERTEX_SHADER);
@@ -209,6 +221,11 @@ bool InitGraphics()
 
     ///////////////////////
     /// initialize rendering objects
+
+    for(int i = 0; i < 9; i++)
+    {
+        TriangleVerts[i] *= 5.0;
+    }
 
     //create vertex buffer for storing per-vertex data
     glGenBuffers(1, &VertexBufferObject_Positions);
@@ -233,6 +250,21 @@ bool InitGraphics()
 
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
+
+    //setup projection matrix
+    constexpr double FoV_y = glm::radians(50.0);
+    const double AspectRatio = Width / Height;
+    constexpr double zNear = 0.1;
+    constexpr double zFar = 1000.0;
+
+    ProjectionMatrix = glm::perspective(FoV_y, AspectRatio, zNear, zFar);
+
+    //set view location, will update every frame for now
+    ViewMatrix = glm::lookAt(EyeLocation, glm::vec3(0.0), UpDirection);
+    ViewProjectionMatrix = ViewMatrix * ProjectionMatrix;
+
+    glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->ProgramID, "ViewProjectionMatrix"), 1, GL_FALSE, (GLfloat*)&ViewProjectionMatrix);
+
 
 
     return true;
@@ -269,7 +301,11 @@ void Run()
 
 void Tick(double dt)
 {
-
+    EyeLocation = glm::vec3(cos(ThisFrameTime) * ViewDistance, 0.0, sin(ThisFrameTime) * ViewDistance);
+    ViewMatrix = glm::lookAt(EyeLocation, glm::vec3(0.0, 0.5, 0.0), UpDirection);
+    ViewProjectionMatrix = ProjectionMatrix * ViewMatrix;
+    fprintf(stdout, "EyeLocation = (%f, %f, %f)\n", EyeLocation.x, EyeLocation.y, EyeLocation.z);
+    glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->ProgramID, "ViewProjectionMatrix"), 1, GL_FALSE, (GLfloat*)&ViewProjectionMatrix);
 }
 
 void Render(double dt)
@@ -290,7 +326,7 @@ void Render(double dt)
     //clear the color and depth buffers
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    if(PassthroughShaderProgram != nullptr && glIsProgram(PassthroughShaderProgram->ProgramID))
+    //if(PassthroughShaderProgram != nullptr && glIsProgram(PassthroughShaderProgram->ProgramID))
     {
         //render here
         glUseProgram(PassthroughShaderProgram->ProgramID);
@@ -372,7 +408,7 @@ void WindowResizeEventCallback(GLFWwindow *Window, int NewWidth, int NewHeight)
     }
 
     glViewport(0, 0, NewWidth, NewHeight);
-    fprintf(stdout, "Winodw resized to %dx%d\n", NewWidth, NewHeight);
+    fprintf(stdout, "Window resized to %dx%d\n", NewWidth, NewHeight);
 }
 
 void UpdateTiming(GLFWwindow* window)
