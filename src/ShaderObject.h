@@ -12,6 +12,7 @@ class ShaderObject
 {
 public:
     ShaderObject(const char* filename = nullptr, GLenum shaderType = GL_VERTEX_SHADER);
+    ~ShaderObject();
 
     bool Load(const char* filename, GLenum shaderType);
     bool Reload();

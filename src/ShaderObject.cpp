@@ -10,6 +10,9 @@
 //memory management
 #include <cstdlib>
 #include <cstring>
+#include <linux/limits.h>
+
+#include "myc/paths/paths.h"
 
 bool ShaderObject::Compile()
 {
@@ -44,15 +47,17 @@ bool ShaderObject::Load(const char* filename, GLenum ShaderType)
         return false;
     }
 
-    size_t FilenameLength = strnlen(filename, 1024);
-    Filename = (char*) malloc(FilenameLength);
-    strncpy(Filename, filename, 256);
-    FILE* file = fopen(filename, "r");
+    const std::string filePath = myc::GetExecutableDir() + filename;
+    FILE* file = fopen(filePath.c_str(), "r");
     if (!file)
     {
         fprintf(stderr, "Failed to open file %s\n", filename);
         return false;
     }
+
+    //copy filename into object memory
+    const size_t FilenameLength = strnlen(filename, PATH_MAX+1);
+    Filename = strndup(filename, FilenameLength);
 
     // Get file size
     fseek(file, 0, SEEK_END);
@@ -88,6 +93,17 @@ ShaderObject::ShaderObject(const char *filename, GLenum shaderType)
     if(filename != nullptr)
     {
         Load(filename, shaderType);
+    }
+}
+
+ShaderObject::~ShaderObject()
+{
+    if(Filename != nullptr){
+        free(Filename);
+        Filename = nullptr;
+    }
+    if(glIsShader(ObjectID)) {
+        glDeleteShader(ObjectID);
     }
 }
 

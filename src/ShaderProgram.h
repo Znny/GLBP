@@ -12,6 +12,7 @@ class ShaderProgram
 {
 public:
     ShaderProgram(const char* name = nullptr);
+    ~ShaderProgram();
 
     void Attach(ShaderObject* Object);
     bool Compile();
@@ -19,7 +20,7 @@ public:
     void Reload();
 
     //name of the shader program
-    char* Name;
+    char* Name = nullptr;
 
     //opengl shader program identifier
     GLuint ProgramID;

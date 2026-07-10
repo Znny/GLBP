@@ -22,6 +22,7 @@
 
 bool Init(int argc, char** argv, char** envp);
 bool InitGraphics();
+bool CreateBestWindow();
 bool InitInput();
 
 void Run();
@@ -102,7 +103,6 @@ static float TriangleColors[] =
 GLuint VertexBufferObject_Positions;
 GLuint VertexBufferObject_Colors;
 
-
 //vertex array object
 GLuint VertexArrayObject;
 
@@ -132,6 +132,8 @@ int main(int argc, char** argv, char** envp)
 /// initialization functions
 bool Init(int argc, char** argv, char** envp)
 {
+    setvbuf(stdout, nullptr, _IOLBF, 0);   // line-buffered regardless of TTY detection
+    // or _IONBF for fully unbuffered, like stderr
     fprintf(stdout, "initializing...\n");
 
     if(!InitGraphics())
@@ -160,40 +162,7 @@ bool InitGraphics()
     //set error callback
     glfwSetErrorCallback(ErrorCallback);
 
-    //try to set context version
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
-
-    //enable anti-aliasing?
-    //glfwWindowHint(GLFW_SAMPLES, 4);
-
-    const char* Title = "GLBP";
-
-    //attempt to create the window
-    MainWindow = glfwCreateWindow( Width, Height, Title, NULL, NULL);
-    if(MainWindow == nullptr)
-    {
-        fprintf(stdout, "Window creation failed.\n");
-        return false;
-    }
-
-    //make the newly created opengl context current
-    glfwMakeContextCurrent(MainWindow);
-
-    //load gl extensions
-    if(!gladLoadGLLoader((GLADloadproc) glfwGetProcAddress))
-    {
-        fprintf(stdout, "Couldn't load openGL extensions\n");
-        return false;
-    }
-    else
-    {
-        fprintf(stdout, "GLAD loaded GL extensions\n");
-    }
-
-    // get version info
-    fprintf(stdout,"Renderer: %s\n", glGetString(GL_RENDERER));
-    fprintf(stdout, "OpenGL %s\n", glGetString(GL_VERSION));
+    CreateBestWindow();
 
     //enable vertical sync
     glfwSwapInterval(1);
@@ -203,9 +172,9 @@ bool InitGraphics()
     glDepthFunc(GL_LESS); // depth-testing interprets a smaller value as "closer"
 
     //create shader objects
-    PassthroughShaderProgram = new ShaderProgram();
-    PassthroughVertexShader = new ShaderObject("resource/passthrough.vs", GL_VERTEX_SHADER);
-    PassthroughFragmentShader = new ShaderObject("resource/passthrough.fs", GL_FRAGMENT_SHADER);
+    PassthroughShaderProgram = new ShaderProgram("passthrough");
+    PassthroughVertexShader = new ShaderObject("/resource/passthrough.vs", GL_VERTEX_SHADER);
+    PassthroughFragmentShader = new ShaderObject("/resource/passthrough.fs", GL_FRAGMENT_SHADER);
 
     //compile vert and frag shaders
     PassthroughVertexShader->Compile();
@@ -265,7 +234,74 @@ bool InitGraphics()
 
     glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->ProgramID, "ViewProjectionMatrix"), 1, GL_FALSE, (GLfloat*)&ViewProjectionMatrix);
 
+    return true;
+}
 
+bool CreateBestWindow()
+{
+    struct GLVersion { int Major = 0; int Minor = 0;};
+
+    constexpr int NumVersions = 3;
+    constexpr GLVersion versionLadder[NumVersions] =
+    {
+        {4, 6 },
+        {4, 2},
+        {3, 3}
+    };
+
+    const GLVersion minVersion {3, 3};
+
+    int CurrentVersionIndex = 0;
+    for(; CurrentVersionIndex < NumVersions; CurrentVersionIndex++)
+    {
+        const int Major = versionLadder[CurrentVersionIndex].Major;
+        const int Minor = versionLadder[CurrentVersionIndex].Minor;
+
+        //try to set context version
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, Major);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, Minor);
+
+        //enable anti-aliasing?
+        //glfwWindowHint(GLFW_SAMPLES, 4);
+
+        const char* Title = "GLBP";
+
+        //attempt to create the window
+        MainWindow = glfwCreateWindow( Width, Height, Title, NULL, NULL);
+        if(MainWindow == nullptr)
+        {
+            printf("GL version %d.%d Window creation failed.\n", Major, Minor);
+        }
+        else
+        {
+            printf("GL version %d.%d Window creation success.\n", Major, Minor);
+            break;
+        }
+    }
+
+    if(CurrentVersionIndex == NumVersions)
+    {
+        printf("Failed to create window, exiting...\n");
+        exit(EXIT_FAILURE);
+    }
+
+    //make the newly created opengl context current
+    glfwMakeContextCurrent(MainWindow);
+
+    //load gl extensions
+    if(!gladLoadGLLoader((GLADloadproc) glfwGetProcAddress))
+    {
+        fprintf(stdout, "Couldn't load openGL extensions\n");
+        return false;
+    }
+    else
+    {
+        fprintf(stdout, "GLAD loaded GL extensions\n");
+    }
+
+    // get version info
+    fprintf(stdout,"Renderer: %s\n", glGetString(GL_RENDERER));
+    fprintf(stdout, "OpenGL %s\n", glGetString(GL_VERSION));
 
     return true;
 }
@@ -304,7 +340,7 @@ void Tick(double dt)
     EyeLocation = glm::vec3(cos(ThisFrameTime) * ViewDistance, 0.0, sin(ThisFrameTime) * ViewDistance);
     ViewMatrix = glm::lookAt(EyeLocation, glm::vec3(0.0, 0.5, 0.0), UpDirection);
     ViewProjectionMatrix = ProjectionMatrix * ViewMatrix;
-    fprintf(stdout, "EyeLocation = (%f, %f, %f)\n", EyeLocation.x, EyeLocation.y, EyeLocation.z);
+    //fprintf(stdout, "EyeLocation = (%f, %f, %f)\n", EyeLocation.x, EyeLocation.y, EyeLocation.z);
     glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->ProgramID, "ViewProjectionMatrix"), 1, GL_FALSE, (GLfloat*)&ViewProjectionMatrix);
 }
 
@@ -376,7 +412,7 @@ void Cleanup()
 void ErrorCallback(int error, const char *description)
 {
     ///todo: switch to use bespoke logging once available
-    fprintf(stderr, "Error %X: %s", error, description);
+    fprintf(stderr, "Error %X: %s\n", error, description);
 }
 
 void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Action, int Modifiers)

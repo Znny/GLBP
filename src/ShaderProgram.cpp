@@ -21,10 +21,16 @@ ShaderProgram::ShaderProgram(const char* name)
     ProgramID = glCreateProgram();
 }
 
+ShaderProgram::~ShaderProgram()
+{
+    glDeleteProgram(ProgramID);
+}
+
 void ShaderProgram::Attach(ShaderObject* Object)
 {
-    fprintf(stdout, "attaching shader %s\n", Object->Filename);
+    fprintf(stdout, "attaching shader %s ... ", Object->Filename);
     glAttachShader(ProgramID, Object->ObjectID);
+    fprintf(stdout, "ID=%d\n", Object->ObjectID);
     AttachedShaderObjects.push_back(Object);
 }
 
