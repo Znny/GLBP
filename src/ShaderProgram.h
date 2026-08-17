@@ -1,33 +1,53 @@
 //
 // Created by ryan on 5/26/24.
 //
+#pragma once
 
-#ifndef GLBP_SHADERPROGRAM_H
-#define GLBP_SHADERPROGRAM_H
-
-#include "ShaderObject.h"
+#include <memory>
+#include <string>
 #include <vector>
 
-class ShaderProgram
-{
-public:
-    ShaderProgram(const char* name = nullptr);
-    ~ShaderProgram();
+namespace Rendering {
+ class ShaderObject;
 
-    void Attach(ShaderObject* Object);
-    bool Compile();
-    bool Link();
-    void Reload();
+ class ShaderProgram
+ {
+ public:
 
-    //name of the shader program
-    char* Name = nullptr;
+  //explicit needed to avoid unnecessary implicit conversions
+  explicit ShaderProgram(const std::string& FileName);
+  ShaderProgram& operator= (ShaderProgram const& sp) = default;
 
-    //opengl shader program identifier
-    GLuint ProgramID;
+  GLuint GetProgramID() const;
 
-    //attached shader objects
-    std::vector<ShaderObject*> AttachedShaderObjects;
-};
+  /** AttachShaderObject
+   * @param Object - the shader object to attach to the shader program
+   */
+  void AttachShaderObject(const std::shared_ptr<ShaderObject> &Object);
 
+  /** CompileAttachedShaders - attempts to compile all attached shader objects
+   * @return true if all shader objects compiled successfully
+   */
+  bool CompileAttachedShaders();
 
-#endif //GLBP_SHADERPROGRAM_H
+  /** LinkShaderProgram
+   * @return true if linking the shader program was successful
+   */
+  bool LinkShaderProgram();
+
+  /** ReloadShaderObjects
+   * ReloadShaderObjects all shader objects
+   */
+  void ReloadShaderObjects();
+
+ protected:
+  //name of the shader program
+  std::string ProgramName;
+
+  //opengl shader program identifier
+  GLuint ProgramID;
+
+  //attached shader objects
+  std::vector<std::shared_ptr<ShaderObject>> AttachedShaderObjects;
+ };
+}

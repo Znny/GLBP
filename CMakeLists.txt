@@ -21,11 +21,13 @@ add_executable(GLBP
         src/glad.c
         src/main.cpp
         src/ShaderObject.cpp
-        src/ShaderProgram.cpp)
+        src/ShaderProgram.cpp
+        src/ShaderManager.cpp)
 
 set(GLFW_LIB_DIR "${CMAKE_SOURCE_DIR}/lib/lib-mingw-w64")
 
 target_link_libraries(GLBP PRIVATE myc_paths)
+target_link_libraries(GLBP PRIVATE myc_logging)
 
 if(WIN32)
     target_link_libraries(GLBP PRIVATE

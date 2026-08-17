@@ -1,35 +1,48 @@
 //
 // Created by ryan on 5/26/24.
 //
+#pragma once
 
-#ifndef GLBP_SHADEROBJECT_H
-#define GLBP_SHADEROBJECT_H
+#include <memory>
+#include <string>
+#include <vector>
 
+typedef unsigned int GLenum;
+typedef unsigned int GLuint;
 
-#include <glad/glad.h>
-
-class ShaderObject
+namespace Rendering
 {
-public:
-    ShaderObject(const char* filename = nullptr, GLenum shaderType = GL_VERTEX_SHADER);
-    ~ShaderObject();
+    class ShaderProgram;
 
-    bool Load(const char* filename, GLenum shaderType);
-    bool Reload();
-    bool Compile();
+    class ShaderObject
+    {
+        friend class ShaderProgram;
+    public:
+        explicit ShaderObject(const std::string& filename, GLenum shaderType);
+        ~ShaderObject();
 
-    //openGL shader object ID, used for bindings and attachment
-    GLuint ObjectID;
+        bool Load(const std::string& filename, GLenum shaderType);
 
-    //type of shader object, valid values are defined by openGL
-    GLenum Type;
+        bool Reload();
 
-    //file source was loaded from
-    char* Filename;
+        bool Compile();
 
-    //soure of the shader, loaded from a file
-    char* ShaderSource;
-};
+    protected:
+        //openGL shader object ID, used for bindings and attachment
+        GLuint ObjectID;
 
+        //type of shader object, valid values are defined by openGL
+        GLenum Type;
 
-#endif //GLBP_SHADEROBJECT_H
+        //file source was loaded from
+        std::string Filename;
+
+        //soure of the shader, loaded from a file
+        std::string ShaderSource;
+        std::vector<std::shared_ptr<ShaderProgram>> ProgramsIncludedIn;
+        bool bCompiled = false;
+    };
+}
+
+#undef GLuint
+#undef GLenum

@@ -15,6 +15,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "ShaderProgram.h"
+#include "ShaderObject.h"
+#include "ShaderManager.h"
 //#include "matrix_clip_space.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -107,9 +109,10 @@ GLuint VertexBufferObject_Colors;
 GLuint VertexArrayObject;
 
 //shader objects
-ShaderProgram* PassthroughShaderProgram;
-ShaderObject* PassthroughVertexShader;
-ShaderObject* PassthroughFragmentShader;
+Rendering::ShaderManager* shaderManager;
+std::shared_ptr<Rendering::ShaderProgram> PassthroughShaderProgram;
+Rendering::ShaderObject* PassthroughVertexShader;
+Rendering::ShaderObject* PassthroughFragmentShader;
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -172,20 +175,13 @@ bool InitGraphics()
     glDepthFunc(GL_LESS); // depth-testing interprets a smaller value as "closer"
 
     //create shader objects
-    PassthroughShaderProgram = new ShaderProgram("passthrough");
-    PassthroughVertexShader = new ShaderObject("/resource/passthrough.vs", GL_VERTEX_SHADER);
-    PassthroughFragmentShader = new ShaderObject("/resource/passthrough.fs", GL_FRAGMENT_SHADER);
+    shaderManager = Rendering::ShaderManager::Get();
+    PassthroughShaderProgram = shaderManager->LoadShaderProgram("passthrough", "/resource/passthrough.vs", "/resource/passthrough.fs");
 
-    //compile vert and frag shaders
-    PassthroughVertexShader->Compile();
-    PassthroughFragmentShader->Compile();
+    //PassthroughShaderProgram = new Rendering::ShaderProgram("passthrough");
+    //PassthroughVertexShader = new Rendering::ShaderObject("/resource/passthrough.vs", GL_VERTEX_SHADER);
+    //PassthroughFragmentShader = new Rendering::ShaderObject("/resource/passthrough.fs", GL_FRAGMENT_SHADER);
 
-    //attach shaders to the shader program
-    PassthroughShaderProgram->Attach(PassthroughVertexShader);
-    PassthroughShaderProgram->Attach(PassthroughFragmentShader);
-
-    //link the program
-    PassthroughShaderProgram->Link();
 
 
     ///////////////////////
@@ -232,7 +228,7 @@ bool InitGraphics()
     ViewMatrix = glm::lookAt(EyeLocation, glm::vec3(0.0), UpDirection);
     ViewProjectionMatrix = ViewMatrix * ProjectionMatrix;
 
-    glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->ProgramID, "ViewProjectionMatrix"), 1, GL_FALSE, (GLfloat*)&ViewProjectionMatrix);
+    glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->GetProgramID(), "ViewProjectionMatrix"), 1, GL_FALSE, (GLfloat*)&ViewProjectionMatrix);
 
     return true;
 }
@@ -341,7 +337,7 @@ void Tick(double dt)
     ViewMatrix = glm::lookAt(EyeLocation, glm::vec3(0.0, 0.5, 0.0), UpDirection);
     ViewProjectionMatrix = ProjectionMatrix * ViewMatrix;
     //fprintf(stdout, "EyeLocation = (%f, %f, %f)\n", EyeLocation.x, EyeLocation.y, EyeLocation.z);
-    glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->ProgramID, "ViewProjectionMatrix"), 1, GL_FALSE, (GLfloat*)&ViewProjectionMatrix);
+    glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->GetProgramID(), "ViewProjectionMatrix"), 1, GL_FALSE, (GLfloat*)&ViewProjectionMatrix);
 }
 
 void Render(double dt)
@@ -365,7 +361,7 @@ void Render(double dt)
     //if(PassthroughShaderProgram != nullptr && glIsProgram(PassthroughShaderProgram->ProgramID))
     {
         //render here
-        glUseProgram(PassthroughShaderProgram->ProgramID);
+        glUseProgram(PassthroughShaderProgram->GetProgramID());
         glBindVertexArray(VertexArrayObject);
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
@@ -428,7 +424,7 @@ void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Ac
     }
     else if(KeyCode == GLFW_KEY_R)
     {
-        PassthroughShaderProgram->Reload();
+        PassthroughShaderProgram->ReloadShaderObjects();
     }
 }
 
