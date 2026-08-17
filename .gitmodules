@@ -1,3 +1,4 @@
 [submodule "extern/myc"]
 	path = extern/myc
 	url = git@github.com:Znny/myc.git
+	branch = main
