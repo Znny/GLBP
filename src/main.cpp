@@ -12,12 +12,13 @@
 #include <glm/glm.hpp>
 
 ///std
-#include <stdlib.h>
-#include <stdio.h>
+#include <cstdlib>
+#include <cstdio>
+
 #include "ShaderProgram.h"
 #include "ShaderObject.h"
 #include "ShaderManager.h"
-//#include "matrix_clip_space.hpp"
+#include "myc/logging/logging.h"
 #include <glm/gtc/matrix_transform.hpp>
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -137,7 +138,7 @@ bool Init(int argc, char** argv, char** envp)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);   // line-buffered regardless of TTY detection
     // or _IONBF for fully unbuffered, like stderr
-    fprintf(stdout, "initializing...\n");
+    LogInfo("initializing...\n");
 
     if(!InitGraphics())
     {
@@ -149,7 +150,8 @@ bool Init(int argc, char** argv, char** envp)
         return false;
     }
 
-    fprintf(stdout, "initialization successful.\n");
+    LogInfo("initialization successful.\n");
+
     return true;
 }
 
@@ -158,7 +160,7 @@ bool InitGraphics()
     //attempt initializing GLFW
     if(!(bGLFWInitialized = glfwInit()))
     {
-        fprintf(stdout, "GLFW initialization failure.\n");
+        LogError("GLFW initialization failure.\n");
         return false;
     }
 
@@ -177,12 +179,6 @@ bool InitGraphics()
     //create shader objects
     shaderManager = Rendering::ShaderManager::Get();
     PassthroughShaderProgram = shaderManager->LoadShaderProgram("passthrough", "/resource/passthrough.vs", "/resource/passthrough.fs");
-
-    //PassthroughShaderProgram = new Rendering::ShaderProgram("passthrough");
-    //PassthroughVertexShader = new Rendering::ShaderObject("/resource/passthrough.vs", GL_VERTEX_SHADER);
-    //PassthroughFragmentShader = new Rendering::ShaderObject("/resource/passthrough.fs", GL_FRAGMENT_SHADER);
-
-
 
     ///////////////////////
     /// initialize rendering objects
@@ -266,18 +262,18 @@ bool CreateBestWindow()
         MainWindow = glfwCreateWindow( Width, Height, Title, NULL, NULL);
         if(MainWindow == nullptr)
         {
-            printf("GL version %d.%d Window creation failed.\n", Major, Minor);
+            LogInfo("GL version %d.%d Window creation failed.\n", Major, Minor);
         }
         else
         {
-            printf("GL version %d.%d Window creation success.\n", Major, Minor);
+            LogInfo("GL version %d.%d Window creation success.\n", Major, Minor);
             break;
         }
     }
 
     if(CurrentVersionIndex == NumVersions)
     {
-        printf("Failed to create window, exiting...\n");
+        LogError("Failed to create window, exiting...\n");
         exit(EXIT_FAILURE);
     }
 
@@ -287,17 +283,17 @@ bool CreateBestWindow()
     //load gl extensions
     if(!gladLoadGLLoader((GLADloadproc) glfwGetProcAddress))
     {
-        fprintf(stdout, "Couldn't load openGL extensions\n");
+        LogError("Couldn't load openGL extensions\n");
         return false;
     }
     else
     {
-        fprintf(stdout, "GLAD loaded GL extensions\n");
+        LogInfo("GLAD loaded GL extensions\n");
     }
 
     // get version info
-    fprintf(stdout,"Renderer: %s\n", glGetString(GL_RENDERER));
-    fprintf(stdout, "OpenGL %s\n", glGetString(GL_VERSION));
+    LogInfo("Renderer: %s\n", glGetString(GL_RENDERER));
+    LogInfo("   OpenGL %s\n", glGetString(GL_VERSION));
 
     return true;
 }
@@ -318,7 +314,7 @@ bool InitInput()
 
 void Run()
 {
-    fprintf(stdout, "run started at time %lfs, running...\n", glfwGetTime());
+    LogInfo("run started at time %lfs, running...\n", glfwGetTime());
 
     while(!bRequestedExit)
     {
@@ -328,7 +324,7 @@ void Run()
         ProcessInput();
     }
 
-    fprintf(stdout, "running complete.\n");
+   LogInfo("running complete.\n");
 }
 
 void Tick(double dt)
@@ -386,7 +382,7 @@ void ProcessInput()
 /// cleanup functions
 void Cleanup()
 {
-    fprintf(stdout, "cleaning up...\n");
+    LogInfo("cleaning up...\n");
 
     //destroy window if one exists
     if(MainWindow != nullptr)
@@ -400,7 +396,7 @@ void Cleanup()
        glfwTerminate();
     }
 
-    fprintf(stdout, "cleanup complete.\n");
+    LogInfo("cleanup complete.\n");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -408,7 +404,7 @@ void Cleanup()
 void ErrorCallback(int error, const char *description)
 {
     ///todo: switch to use bespoke logging once available
-    fprintf(stderr, "Error %X: %s\n", error, description);
+    LogError("glfwError %X: %s\n", error, description);
 }
 
 void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Action, int Modifiers)
@@ -440,7 +436,7 @@ void WindowResizeEventCallback(GLFWwindow *Window, int NewWidth, int NewHeight)
     }
 
     glViewport(0, 0, NewWidth, NewHeight);
-    fprintf(stdout, "Window resized to %dx%d\n", NewWidth, NewHeight);
+    LogInfo("Window resized to %dx%d\n", NewWidth, NewHeight);
 }
 
 void UpdateTiming(GLFWwindow* window)
