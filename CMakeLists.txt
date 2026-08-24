@@ -22,7 +22,12 @@ add_executable(GLBP
         src/main.cpp
         src/ShaderObject.cpp
         src/ShaderProgram.cpp
-        src/ShaderManager.cpp)
+        src/ShaderManager.cpp
+        src/Transform.cpp
+        src/Camera.cpp
+        src/Gizmo.cpp
+        src/SSTextRenderer.cpp
+        src/stb_truetype_impl.cpp)
 
 set(GLFW_LIB_DIR "${CMAKE_SOURCE_DIR}/lib/lib-mingw-w64")
 

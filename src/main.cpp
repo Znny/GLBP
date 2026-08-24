@@ -14,10 +14,15 @@
 ///std
 #include <cstdlib>
 #include <cstdio>
+#include <cmath>
+#include <string>
 
 #include "ShaderProgram.h"
 #include "ShaderObject.h"
 #include "ShaderManager.h"
+#include "Camera.h"
+#include "Gizmo.h"
+#include "SSTextRenderer.h"
 #include "myc/logging/logging.h"
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -34,7 +39,10 @@ void Tick(double DeltaTime);
 void Render(double DeltaTime);
 
 void ProcessInput();
+void UpdateCameraMovement(GLFWwindow* Window, double DeltaTime);
 void KeyboardEventCallback(GLFWwindow* Window, int KeyCode, int ScanCode, int Action, int Modifiers);
+void MouseButtonEventCallback(GLFWwindow* Window, int Button, int Action, int Modifiers);
+void CursorPositionEventCallback(GLFWwindow* Window, double XPos, double YPos);
 void WindowResizeEventCallback(GLFWwindow* Window, int NewWidth, int NewHeight);
 
 void ErrorCallback(int error, const char* description);
@@ -52,25 +60,21 @@ static int Width = DefaultWidth;
 static int Height = DefaultHeight;
 
 //camera
+Camera MainCamera;
 
-//projection matrix, representing how objects in space are projected onto the screen
-glm::mat4x4 ProjectionMatrix;
+//gizmo, and the transform it's currently visualizing
+TransformGizmo Gizmo;
+Transform GizmoTargetTransform;
 
-//view matrix, representing the viewers transform in space
-glm::mat4x4 ViewMatrix;
+//screen-space text
+SSTextRenderer TextRenderer;
 
-//vp matrix, needs to be updated when the projection matrix or view matrix changes
-glm::mat4x4 ViewProjectionMatrix;
-
-
-//view distance from the center
-double ViewDistance = 10.0;
-
-glm::vec3 EyeLocation;
-glm::vec3 UpDirection(0.0, 1.0, 0.0);
-
-//rotation speed in radians/s
-double RotationSpeed = 10.0f;
+//camera fly controls (active only while the right mouse button is held, mirroring most editors)
+static bool bRightMouseHeld = false;
+static bool bFirstCursorSample = true;
+static double LastCursorX = 0.0;
+static double LastCursorY = 0.0;
+static float CameraPitchDeg = 0.0f;
 
 //timing
 static double LastFrameTime = 0;
@@ -180,6 +184,16 @@ bool InitGraphics()
     shaderManager = Rendering::ShaderManager::Get();
     PassthroughShaderProgram = shaderManager->LoadShaderProgram("passthrough", "/resource/passthrough.vs", "/resource/passthrough.fs");
 
+    //create the transform gizmo's shader and generated axis/ring/box meshes
+    Gizmo.Initialize();
+
+    //bake the screen-space text renderer's font atlas
+    if(!TextRenderer.Initialize("/resource/font/Roboto-Medium.ttf", 24.0f))
+    {
+        LogError("Failed to initialize SSTextRenderer\n");
+    }
+    TextRenderer.SetScreenSize(Width, Height);
+
     ///////////////////////
     /// initialize rendering objects
 
@@ -212,19 +226,15 @@ bool InitGraphics()
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
 
-    //setup projection matrix
-    constexpr double FoV_y = glm::radians(50.0);
-    const double AspectRatio = Width / Height;
-    constexpr double zNear = 0.1;
-    constexpr double zFar = 1000.0;
+    //setup the camera: perspective projection matching the window, positioned back from the origin and looking at it
+    MainCamera = Camera((double)Width, (double)Height, 0.1, 1000.0, ECameraProjectionMode::Perspective, 50.0);
+    MainCamera.SetLocation(glm::vec3(4.0f, 3.0f, 8.0f));
 
-    ProjectionMatrix = glm::perspective(FoV_y, AspectRatio, zNear, zFar);
+    const glm::vec3 LookDirection = glm::normalize(GizmoTargetTransform.GetLocation() - MainCamera.GetLocation());
+    MainCamera.SetRotation(glm::quatLookAt(LookDirection, Transform::WorldUp));
 
-    //set view location, will update every frame for now
-    ViewMatrix = glm::lookAt(EyeLocation, glm::vec3(0.0), UpDirection);
-    ViewProjectionMatrix = ViewMatrix * ProjectionMatrix;
-
-    glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->GetProgramID(), "ViewProjectionMatrix"), 1, GL_FALSE, (GLfloat*)&ViewProjectionMatrix);
+    // recover the pitch (in degrees) implied by the initial look-at so mouse-look clamping starts from the right place
+    CameraPitchDeg = glm::degrees(std::asin(glm::clamp(LookDirection.y, -1.0f, 1.0f)));
 
     return true;
 }
@@ -303,6 +313,10 @@ bool InitInput()
     //set keyboard callback
     glfwSetKeyCallback(MainWindow, KeyboardEventCallback);
 
+    //set mouse callbacks, used to fly the camera while the right mouse button is held
+    glfwSetMouseButtonCallback(MainWindow, MouseButtonEventCallback);
+    glfwSetCursorPosCallback(MainWindow, CursorPositionEventCallback);
+
     //set resize callback
     glfwSetFramebufferSizeCallback(MainWindow, WindowResizeEventCallback);
 
@@ -329,11 +343,11 @@ void Run()
 
 void Tick(double dt)
 {
-    EyeLocation = glm::vec3(cos(ThisFrameTime) * ViewDistance, 0.0, sin(ThisFrameTime) * ViewDistance);
-    ViewMatrix = glm::lookAt(EyeLocation, glm::vec3(0.0, 0.5, 0.0), UpDirection);
-    ViewProjectionMatrix = ProjectionMatrix * ViewMatrix;
-    //fprintf(stdout, "EyeLocation = (%f, %f, %f)\n", EyeLocation.x, EyeLocation.y, EyeLocation.z);
-    glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->GetProgramID(), "ViewProjectionMatrix"), 1, GL_FALSE, (GLfloat*)&ViewProjectionMatrix);
+    UpdateCameraMovement(MainWindow, dt);
+
+    const glm::mat4 ViewProjectionMatrix = MainCamera.GetViewProjectionMatrix();
+    glUseProgram(PassthroughShaderProgram->GetProgramID());
+    glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->GetProgramID(), "ViewProjectionMatrix"), 1, GL_FALSE, &ViewProjectionMatrix[0][0]);
 }
 
 void Render(double dt)
@@ -361,6 +375,22 @@ void Render(double dt)
         glBindVertexArray(VertexArrayObject);
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
+
+    //draw the transform gizmo on top of the scene
+    Gizmo.Draw(GizmoTargetTransform, MainCamera.GetLocation(), MainCamera.GetViewProjectionMatrix());
+
+    //draw a small screen-space HUD showing the active gizmo mode and hotkeys
+    const char* ModeName = "Translate (W)";
+    if(Gizmo.GetMode() == EGizmoMode::Rotate)
+    {
+        ModeName = "Rotate (E)";
+    }
+    else if(Gizmo.GetMode() == EGizmoMode::Scale)
+    {
+        ModeName = "Scale (R)";
+    }
+    TextRenderer.DrawText(std::string("Gizmo mode: ") + ModeName, 12.0f, 28.0f, glm::vec3(1.0f, 1.0f, 1.0f));
+    TextRenderer.DrawText("RMB + WASDQE to fly, F5 to reload shaders", 12.0f, 52.0f, glm::vec3(0.7f, 0.7f, 0.7f));
 
     //swap front and back buffers
     glfwSwapBuffers(MainWindow);
@@ -417,10 +447,115 @@ void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Ac
     if(KeyCode == GLFW_KEY_ESCAPE)
     {
         bRequestedExit = true;
+        return;
+    }
+
+    if(KeyCode == GLFW_KEY_F5)
+    {
+        PassthroughShaderProgram->ReloadShaderObjects();
+        return;
+    }
+
+    //gizmo mode hotkeys double as WASDQE camera-fly keys while the right mouse button is held,
+    //so only let them switch the gizmo mode when the camera isn't currently being flown
+    if(bRightMouseHeld)
+    {
+        return;
+    }
+
+    if(KeyCode == GLFW_KEY_W)
+    {
+        Gizmo.SetMode(EGizmoMode::Translate);
+    }
+    else if(KeyCode == GLFW_KEY_E)
+    {
+        Gizmo.SetMode(EGizmoMode::Rotate);
     }
     else if(KeyCode == GLFW_KEY_R)
     {
-        PassthroughShaderProgram->ReloadShaderObjects();
+        Gizmo.SetMode(EGizmoMode::Scale);
+    }
+}
+
+void MouseButtonEventCallback(GLFWwindow *Window, int Button, int Action, int Modifiers)
+{
+    if(Button != GLFW_MOUSE_BUTTON_RIGHT)
+    {
+        return;
+    }
+
+    bRightMouseHeld = (Action == GLFW_PRESS);
+
+    if(bRightMouseHeld)
+    {
+        //hide and lock the cursor for FPS-style mouse-look while flying the camera
+        glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        bFirstCursorSample = true;
+    }
+    else
+    {
+        glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    }
+}
+
+void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
+{
+    if(!bRightMouseHeld)
+    {
+        return;
+    }
+
+    //the first sample after grabbing the cursor has no previous position to diff against
+    if(bFirstCursorSample)
+    {
+        LastCursorX = XPos;
+        LastCursorY = YPos;
+        bFirstCursorSample = false;
+        return;
+    }
+
+    const double DeltaX = XPos - LastCursorX;
+    const double DeltaY = YPos - LastCursorY;
+    LastCursorX = XPos;
+    LastCursorY = YPos;
+
+    constexpr float MouseSensitivity = 0.15f;
+    constexpr float MaxPitchDeg = 89.0f;
+
+    //yaw rotates around the world up axis, independent of the camera's current tilt
+    //MainCamera.RotateWorld(Transform::WorldUp, (float)-DeltaX * MouseSensitivity);
+    MainCamera.RotateLocal(Transform::WorldUp, (float)-DeltaX * MouseSensitivity);
+
+    //pitch rotates around the camera's own local right axis, clamped so it can't flip over
+    float PitchDelta = (float)-DeltaY * MouseSensitivity;
+    PitchDelta = glm::clamp(CameraPitchDeg + PitchDelta, -MaxPitchDeg, MaxPitchDeg) - CameraPitchDeg;
+    CameraPitchDeg += PitchDelta;
+    MainCamera.RotateLocal(MainCamera.GetRightVector(), PitchDelta);
+}
+
+void UpdateCameraMovement(GLFWwindow* Window, double DeltaTime)
+{
+    if(!bRightMouseHeld)
+    {
+        return;
+    }
+
+    constexpr float MoveSpeed = 6.0f;
+    glm::vec3 MoveDirection(0.0f);
+
+    //forward/right movement is local to the camera's current orientation
+    if(glfwGetKey(Window, GLFW_KEY_W) == GLFW_PRESS) MoveDirection -= MainCamera.GetForwardVector();
+    if(glfwGetKey(Window, GLFW_KEY_S) == GLFW_PRESS) MoveDirection += MainCamera.GetForwardVector();
+    if(glfwGetKey(Window, GLFW_KEY_D) == GLFW_PRESS) MoveDirection += MainCamera.GetRightVector();
+    if(glfwGetKey(Window, GLFW_KEY_A) == GLFW_PRESS) MoveDirection -= MainCamera.GetRightVector();
+
+    //up/down movement stays in world space regardless of camera pitch
+    if(glfwGetKey(Window, GLFW_KEY_E) == GLFW_PRESS) MoveDirection += Transform::WorldUp;
+    if(glfwGetKey(Window, GLFW_KEY_Q) == GLFW_PRESS) MoveDirection -= Transform::WorldUp;
+
+    if(glm::length(MoveDirection) > 0.0001f)
+    {
+        MainCamera.AddTranslation(glm::normalize(MoveDirection) * MoveSpeed * (float)DeltaTime);
     }
 }
 
@@ -436,6 +571,12 @@ void WindowResizeEventCallback(GLFWwindow *Window, int NewWidth, int NewHeight)
     }
 
     glViewport(0, 0, NewWidth, NewHeight);
+
+    Width = NewWidth;
+    Height = NewHeight;
+    MainCamera.SetClipDimensions((double)NewWidth, (double)NewHeight, 0.1, 1000.0);
+    TextRenderer.SetScreenSize(NewWidth, NewHeight);
+
     LogInfo("Window resized to %dx%d\n", NewWidth, NewHeight);
 }
 
