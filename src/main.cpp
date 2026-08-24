@@ -23,8 +23,11 @@
 #include "Camera.h"
 #include "Gizmo.h"
 #include "SSTextRenderer.h"
+#include "ConfigManager.h"
 #include "myc/logging/logging.h"
+#include "myc/paths/paths.h"
 #include <glm/gtc/matrix_transform.hpp>
+#include <cstring>
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -84,11 +87,17 @@ static double DeltaTime = 0.0;
 static unsigned int FrameCount = 0;
 static unsigned int LastTimingUpdateFrame = 0;
 
+static bool bUsingWSL = false;
+
 //exit flag
 static bool bRequestedExit = false;
 
 //initialization flags
 static bool bGLFWInitialized = false;
+
+//GL version actually negotiated with the platform in CreateBestWindow (0 until a window exists)
+static int NegotiatedGLVersionMajor = 0;
+static int NegotiatedGLVersionMinor = 0;
 
 //vertices of a single triangle
 static float TriangleVerts[] =
@@ -143,6 +152,26 @@ bool Init(int argc, char** argv, char** envp)
     setvbuf(stdout, nullptr, _IOLBF, 0);   // line-buffered regardless of TTY detection
     // or _IONBF for fully unbuffered, like stderr
     LogInfo("initializing...\n");
+
+    const char* WSLIndicatorStrings[3] =
+    {
+    "WSL_DISTRO_NAME",
+    "WSL2_GUI_APPS_ENABLED",
+    "WSL_INTEROP"
+    };
+
+    for (int i = 0; i < 3; i++)
+    {
+        if (getenv(WSLIndicatorStrings[i]) != nullptr)
+        {
+            LogWarning("*** Detected WSL environment ***\n");
+            LogWarning("* cursor hiding is not supported and will be disabled\n");
+            bUsingWSL = true;
+            break;
+        }
+    }
+
+    ConfigManager::Get().LoadFromFile(myc::GetExecutableDir() + "/config/default.conf");
 
     if(!InitGraphics())
     {
@@ -228,13 +257,7 @@ bool InitGraphics()
 
     //setup the camera: perspective projection matching the window, positioned back from the origin and looking at it
     MainCamera = Camera((double)Width, (double)Height, 0.1, 1000.0, ECameraProjectionMode::Perspective, 50.0);
-    MainCamera.SetLocation(glm::vec3(4.0f, 3.0f, 8.0f));
-
-    const glm::vec3 LookDirection = glm::normalize(GizmoTargetTransform.GetLocation() - MainCamera.GetLocation());
-    MainCamera.SetRotation(glm::quatLookAt(LookDirection, Transform::WorldUp));
-
-    // recover the pitch (in degrees) implied by the initial look-at so mouse-look clamping starts from the right place
-    CameraPitchDeg = glm::degrees(std::asin(glm::clamp(LookDirection.y, -1.0f, 1.0f)));
+    MainCamera.SetLocation(glm::vec3(0.0f, 0.0f, 8.0f));
 
     return true;
 }
@@ -243,21 +266,28 @@ bool CreateBestWindow()
 {
     struct GLVersion { int Major = 0; int Minor = 0;};
 
-    constexpr int NumVersions = 3;
-    constexpr GLVersion versionLadder[NumVersions] =
+    //desired is attempted first; required is the minimum acceptable fallback. both come from config/default.conf
+    ConfigManager& Config = ConfigManager::Get();
+    const GLVersion DesiredVersion
     {
-        {4, 6 },
-        {4, 2},
-        {3, 3}
+        Config.GetInt("gl_version_desired_major", 4),
+        Config.GetInt("gl_version_desired_minor", 6)
+    };
+    const GLVersion RequiredVersion
+    {
+        Config.GetInt("gl_version_required_major", 3),
+        Config.GetInt("gl_version_required_minor", 3)
     };
 
-    const GLVersion minVersion {3, 3};
+    const bool bDesiredDiffersFromRequired = DesiredVersion.Major != RequiredVersion.Major || DesiredVersion.Minor != RequiredVersion.Minor;
+    const GLVersion VersionsToTry[2] = { DesiredVersion, RequiredVersion };
+    const int NumVersionsToTry = bDesiredDiffersFromRequired ? 2 : 1;
 
     int CurrentVersionIndex = 0;
-    for(; CurrentVersionIndex < NumVersions; CurrentVersionIndex++)
+    for(; CurrentVersionIndex < NumVersionsToTry; CurrentVersionIndex++)
     {
-        const int Major = versionLadder[CurrentVersionIndex].Major;
-        const int Minor = versionLadder[CurrentVersionIndex].Minor;
+        const int Major = VersionsToTry[CurrentVersionIndex].Major;
+        const int Minor = VersionsToTry[CurrentVersionIndex].Minor;
 
         //try to set context version
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, Major);
@@ -277,13 +307,16 @@ bool CreateBestWindow()
         else
         {
             LogInfo("GL version %d.%d Window creation success.\n", Major, Minor);
+            NegotiatedGLVersionMajor = Major;
+            NegotiatedGLVersionMinor = Minor;
             break;
         }
     }
 
-    if(CurrentVersionIndex == NumVersions)
+    if(CurrentVersionIndex == NumVersionsToTry)
     {
-        LogError("Failed to create window, exiting...\n");
+        LogError("Failed to create window with desired GL %d.%d or required GL %d.%d, exiting...\n",
+                 DesiredVersion.Major, DesiredVersion.Minor, RequiredVersion.Major, RequiredVersion.Minor);
         exit(EXIT_FAILURE);
     }
 
@@ -391,6 +424,10 @@ void Render(double dt)
     }
     TextRenderer.DrawText(std::string("Gizmo mode: ") + ModeName, 12.0f, 28.0f, glm::vec3(1.0f, 1.0f, 1.0f));
     TextRenderer.DrawText("RMB + WASDQE to fly, F5 to reload shaders", 12.0f, 52.0f, glm::vec3(0.7f, 0.7f, 0.7f));
+    if(bUsingWSL)
+    {
+        TextRenderer.DrawText("Warning: Cursor hiding is not supported on WSL, please consider running natively on windows or linux", 12.0f, 76.0f, glm::vec3(1.0f, 1.0f, 0.2f));
+    }
 
     //swap front and back buffers
     glfwSwapBuffers(MainWindow);
@@ -488,13 +525,19 @@ void MouseButtonEventCallback(GLFWwindow *Window, int Button, int Action, int Mo
 
     if(bRightMouseHeld)
     {
-        //hide and lock the cursor for FPS-style mouse-look while flying the camera
-        glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        if(!bUsingWSL)
+        {
+            //hide and lock the cursor for FPS-style mouse-look while flying the camera
+            glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        }
         bFirstCursorSample = true;
     }
     else
     {
-        glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        if(!bUsingWSL)
+        {
+            glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        }
     }
 }
 

@@ -20,6 +20,7 @@ include_directories(extern/myc)
 add_executable(GLBP
         src/glad.c
         src/main.cpp
+        src/ConfigManager.cpp
         src/ShaderObject.cpp
         src/ShaderProgram.cpp
         src/ShaderManager.cpp
@@ -48,3 +49,9 @@ add_custom_command(TARGET GLBP POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_SOURCE_DIR}/resource
         $<TARGET_FILE_DIR:GLBP>/resource)
+
+# Add post-build command which copies config files into the build directory the target was placed in
+add_custom_command(TARGET GLBP POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/config
+        $<TARGET_FILE_DIR:GLBP>/config)
