@@ -31,6 +31,8 @@
 #include "IndexBuffer.h"
 #include "VertexArray.h"
 #include "Texture2D.h"
+#include "UniformBuffer.h"
+#include "FrameConstants.h"
 #include "Camera.h"
 #include "Gizmo.h"
 #include "SSTextRenderer.h"
@@ -145,6 +147,10 @@ std::optional<Rendering::VertexArray> HexStrip;
 std::optional<Rendering::VertexArray> TexturedQuad;
 std::optional<Rendering::Texture2D> CheckerTexture;
 
+//shared per-frame data (time/resolution/cursor/view-projection) any shader can opt into via the
+//FrameConstants uniform block - see resource/textured.vs/.fs for the consuming side
+std::optional<Rendering::UniformBuffer> FrameConstantsUBO;
+
 //shader objects
 Rendering::ShaderManager* shaderManager;
 std::shared_ptr<Rendering::ShaderProgram> PassthroughShaderProgram;
@@ -237,6 +243,10 @@ bool InitGraphics()
     shaderManager = Rendering::ShaderManager::Get();
     PassthroughShaderProgram = shaderManager->LoadShaderProgram("passthrough", "/resource/passthrough.vs", "/resource/passthrough.fs");
     TexturedShaderProgram = shaderManager->LoadShaderProgram("textured", "/resource/textured.vs", "/resource/textured.fs");
+
+    FrameConstantsUBO.emplace(sizeof(Rendering::FFrameConstants), GL_DYNAMIC_DRAW);
+    FrameConstantsUBO->BindToPoint(Rendering::FrameConstantsBindingPoint);
+    Rendering::BindFrameConstantsBlock(TexturedShaderProgram->GetProgramID());
 
     //create the transform gizmo's shader and generated axis/ring/box meshes
     Gizmo.Initialize();
@@ -507,8 +517,18 @@ void Tick(double dt)
     glUseProgram(PassthroughShaderProgram->GetProgramID());
     glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->GetProgramID(), "ViewProjectionMatrix"), 1, GL_FALSE, &ViewProjectionMatrix[0][0]);
 
-    glUseProgram(TexturedShaderProgram->GetProgramID());
-    glUniformMatrix4fv(glGetUniformLocation(TexturedShaderProgram->GetProgramID(), "ViewProjectionMatrix"), 1, GL_FALSE, &ViewProjectionMatrix[0][0]);
+    //TexturedShaderProgram gets its ViewProjectionMatrix (plus time/resolution/cursor) from the
+    //FrameConstants UBO instead of an individual uniform - update it once here for every shader
+    //that opts in, rather than setting it per-program like the uniform above
+    double CursorX = 0.0, CursorY = 0.0;
+    glfwGetCursorPos(MainWindow, &CursorX, &CursorY);
+
+    Rendering::FFrameConstants FrameData{};
+    FrameData.ViewProjectionMatrix = ViewProjectionMatrix;
+    FrameData.Resolution = glm::vec2((float)Width, (float)Height);
+    FrameData.CursorPosition = glm::vec2((float)CursorX, (float)CursorY);
+    FrameData.Time = (float)ThisFrameTime;
+    FrameConstantsUBO->SetData(&FrameData, sizeof(FrameData));
 }
 
 void Render(double dt)
@@ -658,6 +678,9 @@ void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Ac
     {
         PassthroughShaderProgram->ReloadShaderObjects();
         TexturedShaderProgram->ReloadShaderObjects();
+
+        //relinking resets a program's uniform block bindings, so this needs reassigning after every reload
+        Rendering::BindFrameConstantsBlock(TexturedShaderProgram->GetProgramID());
         return;
     }
 

@@ -53,6 +53,8 @@ add_executable(GLBP
         src/VertexBuffer.cpp
         src/IndexBuffer.cpp
         src/VertexArray.cpp
+        src/UniformBuffer.cpp
+        src/FrameConstants.cpp
         src/ShaderObject.cpp
         src/ShaderProgram.cpp
         src/ShaderManager.cpp
