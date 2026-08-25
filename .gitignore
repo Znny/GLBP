@@ -30,3 +30,27 @@
 *.exe
 *.out
 *.app
+
+# Build output
+build/
+
+# Dear ImGui window-layout state, rewritten on every run
+imgui.ini
+
+# Editor/IDE
+.idea/
+.vscode
+
+# Shell/environment dotfiles that don't belong to this project
+.bash_profile
+.bashrc
+.zprofile
+.zshrc
+.profile
+.gitconfig
+.env
+secrets
+
+# Local tool config
+.mcp.json
+.ripgreprc
