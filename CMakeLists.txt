@@ -50,6 +50,9 @@ add_executable(GLBP
         src/glad.c
         src/main.cpp
         src/ConfigManager.cpp
+        src/VertexBuffer.cpp
+        src/IndexBuffer.cpp
+        src/VertexArray.cpp
         src/ShaderObject.cpp
         src/ShaderProgram.cpp
         src/ShaderManager.cpp

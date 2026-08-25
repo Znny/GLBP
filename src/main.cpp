@@ -21,10 +21,15 @@
 #include <cstdio>
 #include <cmath>
 #include <string>
+#include <optional>
+#include <vector>
 
 #include "ShaderProgram.h"
 #include "ShaderObject.h"
 #include "ShaderManager.h"
+#include "VertexBuffer.h"
+#include "IndexBuffer.h"
+#include "VertexArray.h"
 #include "Camera.h"
 #include "Gizmo.h"
 #include "SSTextRenderer.h"
@@ -126,6 +131,13 @@ GLuint VertexBufferObject_Colors;
 
 //vertex array object
 GLuint VertexArrayObject;
+
+//hexagonal ring ("O") drawn around the triangle above, built with the new VertexBuffer/IndexBuffer/
+//VertexArray classes instead of raw GL calls. std::optional because VertexArray's constructor calls
+//glGenVertexArrays(), which needs a live GL context - this can't be constructed at global-init time,
+//only once InitGraphics() has created the window/context (mirrors how Gizmo/TextRenderer are default-
+//constructed globally but only actually touch GL from an Initialize() called after that point).
+std::optional<Rendering::VertexArray> HexStrip;
 
 //shader objects
 Rendering::ShaderManager* shaderManager;
@@ -259,6 +271,45 @@ bool InitGraphics()
 
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
+
+    //hexagonal ring ("O") surrounding the triangle above, built with VertexBuffer/IndexBuffer/VertexArray
+    //instead of raw GL calls - proves out the new abstraction alongside the old hand-rolled style right next to it
+    {
+        constexpr float InnerRadius = 4.0f;
+        constexpr float OuterRadius = 5.0f;
+        constexpr int SideCount = 6;
+
+        //interleaved {x,y,z, r,g,b} per vertex, alternating outer/inner rim points so the strip
+        //tiles the ring; the first outer/inner pair is repeated at the end to close the loop
+        std::vector<float> HexVerts;
+        for(int Side = 0; Side <= SideCount; Side++)
+        {
+            const float Angle = glm::radians(360.0f * (float)Side / (float)SideCount);
+            const float CosA = cosf(Angle);
+            const float SinA = sinf(Angle);
+
+            //outer rim vertex
+            HexVerts.insert(HexVerts.end(), {OuterRadius * CosA, OuterRadius * SinA, 0.0f, 1.0f, 0.6f, 0.0f});
+            //inner rim vertex
+            HexVerts.insert(HexVerts.end(), {InnerRadius * CosA, InnerRadius * SinA, 0.0f, 1.0f, 0.6f, 0.0f});
+        }
+
+        std::vector<GLuint> HexIndices(HexVerts.size() / 6);
+        for(size_t i = 0; i < HexIndices.size(); i++)
+        {
+            HexIndices[i] = (GLuint)i;
+        }
+
+        HexStrip.emplace();
+        HexStrip->AddVertexBuffer(
+            Rendering::VertexBuffer(HexVerts.data(), HexVerts.size() * sizeof(float), GL_STATIC_DRAW),
+            {
+                Rendering::FVertexAttribute{0, 3, GL_FLOAT, false},
+                Rendering::FVertexAttribute{1, 3, GL_FLOAT, false}
+            },
+            6 * sizeof(float));
+        HexStrip->SetIndexBuffer(Rendering::IndexBuffer(HexIndices.data(), (unsigned int)HexIndices.size(), GL_STATIC_DRAW));
+    }
 
     //setup the camera: perspective projection matching the window, positioned back from the origin and looking at it
     MainCamera = Camera((double)Width, (double)Height, 0.1, 1000.0, ECameraProjectionMode::Perspective, 50.0);
@@ -432,6 +483,13 @@ void Render(double dt)
         glUseProgram(PassthroughShaderProgram->GetProgramID());
         glBindVertexArray(VertexArrayObject);
         glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+
+    //draw the hex ring around the triangle - same shader/uniforms, geometry built via the new
+    //VertexBuffer/IndexBuffer/VertexArray classes instead of raw GL calls like the triangle above
+    if(HexStrip.has_value())
+    {
+        HexStrip->Draw(GL_TRIANGLE_STRIP);
     }
 
     //draw the transform gizmo on top of the scene
