@@ -60,7 +60,9 @@ add_executable(GLBP
         src/Camera.cpp
         src/Gizmo.cpp
         src/SSTextRenderer.cpp
-        src/stb_truetype_impl.cpp)
+        src/stb_truetype_impl.cpp
+        src/Texture2D.cpp
+        src/stb_image_impl.cpp)
 
 set(GLFW_LIB_DIR "${CMAKE_SOURCE_DIR}/lib/lib-mingw-w64")
 

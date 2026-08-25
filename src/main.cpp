@@ -30,6 +30,7 @@
 #include "VertexBuffer.h"
 #include "IndexBuffer.h"
 #include "VertexArray.h"
+#include "Texture2D.h"
 #include "Camera.h"
 #include "Gizmo.h"
 #include "SSTextRenderer.h"
@@ -139,9 +140,15 @@ GLuint VertexArrayObject;
 //constructed globally but only actually touch GL from an Initialize() called after that point).
 std::optional<Rendering::VertexArray> HexStrip;
 
+//textured quad demonstrating Texture2D, off to the side of the triangle/hex-ring so they don't overlap.
+//same std::optional-for-deferred-construction reasoning as HexStrip above applies to both members here.
+std::optional<Rendering::VertexArray> TexturedQuad;
+std::optional<Rendering::Texture2D> CheckerTexture;
+
 //shader objects
 Rendering::ShaderManager* shaderManager;
 std::shared_ptr<Rendering::ShaderProgram> PassthroughShaderProgram;
+std::shared_ptr<Rendering::ShaderProgram> TexturedShaderProgram;
 Rendering::ShaderObject* PassthroughVertexShader;
 Rendering::ShaderObject* PassthroughFragmentShader;
 
@@ -229,6 +236,7 @@ bool InitGraphics()
     //create shader objects
     shaderManager = Rendering::ShaderManager::Get();
     PassthroughShaderProgram = shaderManager->LoadShaderProgram("passthrough", "/resource/passthrough.vs", "/resource/passthrough.fs");
+    TexturedShaderProgram = shaderManager->LoadShaderProgram("textured", "/resource/textured.vs", "/resource/textured.fs");
 
     //create the transform gizmo's shader and generated axis/ring/box meshes
     Gizmo.Initialize();
@@ -309,6 +317,55 @@ bool InitGraphics()
             },
             6 * sizeof(float));
         HexStrip->SetIndexBuffer(Rendering::IndexBuffer(HexIndices.data(), (unsigned int)HexIndices.size(), GL_STATIC_DRAW));
+    }
+
+    //textured quad off to the side of the triangle/hex-ring, proving out Texture2D. The checkerboard
+    //is generated as 3-channel RGB (not RGBA) specifically so this exercises Texture2D's non-4-byte-
+    //aligned upload path (GL_UNPACK_ALIGNMENT=1), not just the trivial RGBA case.
+    {
+        constexpr int CheckerSize = 64;
+        constexpr int SquarePixels = 8;
+        std::vector<unsigned char> CheckerPixels(CheckerSize * CheckerSize * 3);
+        for(int y = 0; y < CheckerSize; y++)
+        {
+            for(int x = 0; x < CheckerSize; x++)
+            {
+                const bool bLight = ((x / SquarePixels) + (y / SquarePixels)) % 2 == 0;
+                const unsigned char Value = bLight ? 220 : 40;
+                const int PixelIndex = (y * CheckerSize + x) * 3;
+                CheckerPixels[PixelIndex + 0] = Value;
+                CheckerPixels[PixelIndex + 1] = Value;
+                CheckerPixels[PixelIndex + 2] = Value;
+            }
+        }
+        CheckerTexture.emplace(CheckerPixels.data(), CheckerSize, CheckerSize, 3, GL_REPEAT);
+
+        //interleaved {x,y,z, u,v} per vertex; UVs go to 2.0 (not 1.0) so GL_REPEAT tiles the
+        //checkerboard twice across the quad instead of just stretching one copy over it.
+        //Offset/size are deliberately tight: at z=0 this camera (50deg vertical FOV, 1920x1080,
+        //8 units back) only has ~6.6 units of horizontal half-width in view, and the hex ring's
+        //outer radius already reaches 5 - this box keeps the quad clear of the ring on one side
+        //and inside the frustum on the other, with a small margin either way.
+        constexpr float QuadHalfSize = 0.6f;
+        constexpr float QuadOffsetX = 5.7f;
+        const float QuadVerts[] =
+        {
+            QuadOffsetX - QuadHalfSize, -QuadHalfSize, 0.0f,  0.0f, 0.0f,
+            QuadOffsetX + QuadHalfSize, -QuadHalfSize, 0.0f,  3.0f, 0.0f,
+            QuadOffsetX + QuadHalfSize,  QuadHalfSize, 0.0f,  3.0f, 3.0f,
+            QuadOffsetX - QuadHalfSize,  QuadHalfSize, 0.0f,  0.0f, 3.0f,
+        };
+        const GLuint QuadIndices[] = {0, 1, 2, 2, 3, 0};
+
+        TexturedQuad.emplace();
+        TexturedQuad->AddVertexBuffer(
+            Rendering::VertexBuffer(QuadVerts, sizeof(QuadVerts), GL_STATIC_DRAW),
+            {
+                Rendering::FVertexAttribute{0, 3, GL_FLOAT, false},
+                Rendering::FVertexAttribute{1, 2, GL_FLOAT, false}
+            },
+            5 * sizeof(float));
+        TexturedQuad->SetIndexBuffer(Rendering::IndexBuffer(QuadIndices, 6, GL_STATIC_DRAW));
     }
 
     //setup the camera: perspective projection matching the window, positioned back from the origin and looking at it
@@ -449,6 +506,9 @@ void Tick(double dt)
     const glm::mat4 ViewProjectionMatrix = MainCamera.GetViewProjectionMatrix();
     glUseProgram(PassthroughShaderProgram->GetProgramID());
     glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->GetProgramID(), "ViewProjectionMatrix"), 1, GL_FALSE, &ViewProjectionMatrix[0][0]);
+
+    glUseProgram(TexturedShaderProgram->GetProgramID());
+    glUniformMatrix4fv(glGetUniformLocation(TexturedShaderProgram->GetProgramID(), "ViewProjectionMatrix"), 1, GL_FALSE, &ViewProjectionMatrix[0][0]);
 }
 
 void Render(double dt)
@@ -490,6 +550,15 @@ void Render(double dt)
     if(HexStrip.has_value())
     {
         HexStrip->Draw(GL_TRIANGLE_STRIP);
+    }
+
+    //draw the checkerboard-textured quad next to the triangle/hex-ring, proving out Texture2D
+    if(TexturedQuad.has_value() && CheckerTexture.has_value())
+    {
+        glUseProgram(TexturedShaderProgram->GetProgramID());
+        glUniform1i(glGetUniformLocation(TexturedShaderProgram->GetProgramID(), "TexSampler"), 0);
+        CheckerTexture->Bind(0);
+        TexturedQuad->Draw(GL_TRIANGLES);
     }
 
     //draw the transform gizmo on top of the scene
@@ -588,6 +657,7 @@ void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Ac
     if(KeyCode == GLFW_KEY_F5)
     {
         PassthroughShaderProgram->ReloadShaderObjects();
+        TexturedShaderProgram->ReloadShaderObjects();
         return;
     }
 
