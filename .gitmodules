@@ -2,3 +2,7 @@
 	path = extern/myc
 	url = git@github.com:Znny/myc.git
 	branch = main
+[submodule "extern/imgui"]
+	path = extern/imgui
+	url = https://github.com/ocornut/imgui.git
+	branch = docking

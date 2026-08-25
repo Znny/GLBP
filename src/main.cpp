@@ -8,6 +8,11 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
+//dear imgui
+#include <imgui.h>
+#include <backends/imgui_impl_glfw.h>
+#include <backends/imgui_impl_opengl3.h>
+
 //glm
 #include <glm/glm.hpp>
 
@@ -353,6 +358,18 @@ bool InitInput()
     //set resize callback
     glfwSetFramebufferSizeCallback(MainWindow, WindowResizeEventCallback);
 
+    //set up Dear ImGui. must come after the callbacks above so its GLFW backend
+    //(install_callbacks=true) can chain to them rather than silently replacing them
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& IO = ImGui::GetIO();
+    IO.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    //deliberately not enabling ImGuiConfigFlags_ViewportsEnable - platform multi-viewport
+    //spawns real OS windows, which hits the same broken cursor-warp behavior WSLg already
+    //has trouble with for GLFW_CURSOR_DISABLED
+    ImGui_ImplGlfw_InitForOpenGL(MainWindow, true);
+    ImGui_ImplOpenGL3_Init("#version 330");
+
     return true;
 }
 
@@ -385,6 +402,14 @@ void Tick(double dt)
 
 void Render(double dt)
 {
+    //start a new Dear ImGui frame - nothing is actually drawn until ImGui::Render()/RenderDrawData() below
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    //smoke test for the ImGui integration - gets replaced by real tool panels (shader playground, etc.) later
+    ImGui::ShowDemoWindow();
+
     //update uniform variables
     //camera variables
     //timing variables
@@ -429,6 +454,10 @@ void Render(double dt)
         TextRenderer.DrawText("Warning: Cursor hiding is not supported on WSL, please consider running natively on windows or linux", 12.0f, 76.0f, glm::vec3(1.0f, 1.0f, 0.2f));
     }
 
+    //finalize and draw the ImGui frame on top of the scene
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
     //swap front and back buffers
     glfwSwapBuffers(MainWindow);
 }
@@ -450,6 +479,11 @@ void ProcessInput()
 void Cleanup()
 {
     LogInfo("cleaning up...\n");
+
+    //shut down Dear ImGui before the GL context/window it depends on goes away
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
 
     //destroy window if one exists
     if(MainWindow != nullptr)
@@ -476,6 +510,12 @@ void ErrorCallback(int error, const char *description)
 
 void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Action, int Modifiers)
 {
+    //don't let gizmo/camera hotkeys fire while an ImGui widget (e.g. a text field) wants the keyboard
+    if(ImGui::GetIO().WantCaptureKeyboard)
+    {
+        return;
+    }
+
     if(Action != GLFW_PRESS)
     {
         return;
@@ -516,6 +556,12 @@ void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Ac
 
 void MouseButtonEventCallback(GLFWwindow *Window, int Button, int Action, int Modifiers)
 {
+    //don't start camera-fly from a click ImGui already claimed (e.g. on a panel/widget)
+    if(ImGui::GetIO().WantCaptureMouse)
+    {
+        return;
+    }
+
     if(Button != GLFW_MOUSE_BUTTON_RIGHT)
     {
         return;
@@ -543,6 +589,11 @@ void MouseButtonEventCallback(GLFWwindow *Window, int Button, int Action, int Mo
 
 void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
 {
+    if(ImGui::GetIO().WantCaptureMouse)
+    {
+        return;
+    }
+
     if(!bRightMouseHeld)
     {
         return;
