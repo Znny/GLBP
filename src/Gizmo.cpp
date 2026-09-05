@@ -190,6 +190,8 @@ void TransformGizmo::Initialize()
     RotateMesh = BuildRotateMesh();
     ScaleMesh = BuildScaleMesh();
 
+    CurrentMesh = &TranslateMesh;
+
     bInitialized = true;
 }
 
@@ -256,21 +258,11 @@ TransformGizmo::FGizmoMesh TransformGizmo::UploadMesh(const std::vector<glm::vec
     return Mesh;
 }
 
-void TransformGizmo::Draw(const Transform& Target, const glm::vec3& CameraLocation, const glm::mat4& ViewProjectionMatrix)
+void TransformGizmo::Draw(const Transform& Target, const glm::vec3& CameraLocation)
 {
-    if (!bInitialized || !Shader)
+    if (!bInitialized || !Shader || !CurrentMesh)
     {
         return;
-    }
-
-    const FGizmoMesh* Mesh = &TranslateMesh;
-    if (Mode == EGizmoMode::Rotate)
-    {
-        Mesh = &RotateMesh;
-    }
-    else if (Mode == EGizmoMode::Scale)
-    {
-        Mesh = &ScaleMesh;
     }
 
     const glm::vec3 TargetLocation = Target.GetLocation();
@@ -283,20 +275,19 @@ void TransformGizmo::Draw(const Transform& Target, const glm::vec3& CameraLocati
 
     const GLuint ProgramID = Shader->GetProgramID();
     glUseProgram(ProgramID);
-    glUniformMatrix4fv(glGetUniformLocation(ProgramID, "ViewProjectionMatrix"), 1, GL_FALSE, &ViewProjectionMatrix[0][0]);
     glUniformMatrix4fv(glGetUniformLocation(ProgramID, "ModelMatrix"), 1, GL_FALSE, &ModelMatrix[0][0]);
 
     // gizmo always draws on top, like most editors' viewport overlays
     glDisable(GL_DEPTH_TEST);
 
-    glBindVertexArray(Mesh->VAO);
-    if (Mesh->LineVertexCount > 0)
+    glBindVertexArray(CurrentMesh->VAO);
+    if (CurrentMesh->LineVertexCount > 0)
     {
-        glDrawArrays(GL_LINES, 0, Mesh->LineVertexCount);
+        glDrawArrays(GL_LINES, 0, CurrentMesh->LineVertexCount);
     }
-    if (Mesh->TriangleVertexCount > 0)
+    if (CurrentMesh->TriangleVertexCount > 0)
     {
-        glDrawArrays(GL_TRIANGLES, Mesh->LineVertexCount, Mesh->TriangleVertexCount);
+        glDrawArrays(GL_TRIANGLES, CurrentMesh->LineVertexCount, CurrentMesh->TriangleVertexCount);
     }
     glBindVertexArray(0);
 
@@ -336,3 +327,26 @@ void TransformGizmo::ApplyScaleDelta(Transform& Target, EGizmoAxis Axis, float D
     // TODO: once handle picking exists, add Delta to Target's scale component along Axis,
     // e.g. Target.SetScale(Target.GetScale() + AxisDirection(Axis) * Delta);
 }
+
+GLuint TransformGizmo::GetShaderID() const
+{
+    return Shader->GetProgramID();
+}
+
+void TransformGizmo::SetMode(EGizmoMode NewMode)
+{
+    Mode = NewMode;
+    switch(Mode)
+    {
+        case EGizmoMode::Translate:
+            CurrentMesh = &TranslateMesh;
+            break;
+        case EGizmoMode::Rotate:
+            CurrentMesh = &RotateMesh;
+            break;
+        case EGizmoMode::Scale:
+            CurrentMesh = &ScaleMesh;
+            break;
+    }
+}
+

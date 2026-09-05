@@ -65,5 +65,5 @@ void Camera::UpdateProjectionMatrix()
     ProjectionMatrix =
         ProjectionMode == ECameraProjectionMode::Perspective
             ? glm::perspective(glm::radians(VerticalFieldOfView), ClipWidth / ClipHeight, NearClipDistance, FarClipDistance)
-            : glm::ortho(0.0, ClipWidth, 0.0, ClipHeight, NearClipDistance, FarClipDistance);
+            : glm::ortho(-ClipWidth * 0.5, ClipWidth * 0.5, -ClipHeight * 0.5, ClipHeight * 0.5, NearClipDistance, FarClipDistance);
 }

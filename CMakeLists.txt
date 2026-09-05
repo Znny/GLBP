@@ -64,7 +64,13 @@ add_executable(GLBP
         src/SSTextRenderer.cpp
         src/stb_truetype_impl.cpp
         src/Texture2D.cpp
-        src/stb_image_impl.cpp)
+        src/Framebuffer.cpp
+        src/stb_image_impl.cpp
+        src/FramebufferAttachment.cpp
+        src/FramebufferAttachment.h
+        src/glTypes.h
+        src/FramebufferAttachment_constants.cpp
+        src/Delegates.h)
 
 set(GLFW_LIB_DIR "${CMAKE_SOURCE_DIR}/lib/lib-mingw-w64")
 

@@ -1,16 +1,15 @@
 #pragma once
 
-#include <optional>
 #include <vector>
+#include <memory>
 
-#include "VertexBuffer.h"
-#include "IndexBuffer.h"
-
-typedef unsigned int GLenum;
-typedef unsigned int GLuint;
+#include "glTypes.h"
 
 namespace Rendering
 {
+    class IndexBuffer;
+    class VertexBuffer;
+
     // Describes one interleaved vertex attribute (position, color, uv, ...) within a VertexBuffer.
     // Byte offsets within the vertex are computed automatically by VertexArray::AddVertexBuffer,
     // based on the order attributes appear in the list passed to it.
@@ -50,15 +49,17 @@ namespace Rendering
         void Draw(GLenum PrimitiveType) const;
 
         GLuint GetArrayID() const { return ArrayID; }
-        const std::optional<IndexBuffer>& GetIndexBuffer() const { return IndexBufferObject; }
+
+        // Non-owning - null if this VertexArray has no index buffer set. Returning the owning
+        // unique_ptr<IndexBuffer> itself isn't possible from a const getter (it's move-only, and
+        // a const method can't move its own member out), and callers here only ever need to look
+        // at/use the index buffer, not take ownership away from this VertexArray.
+        const IndexBuffer* GetIndexBuffer() const;
 
     private:
         GLuint ArrayID = 0;
-        std::vector<VertexBuffer> VertexBuffers;
-        std::optional<IndexBuffer> IndexBufferObject;
+        std::vector<std::unique_ptr<VertexBuffer>> VertexBuffers;
+        std::unique_ptr<IndexBuffer> IndexBufferObject;
         int VertexCount = 0;
     };
 }
-
-#undef GLuint
-#undef GLenum

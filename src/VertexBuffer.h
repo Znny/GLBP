@@ -1,7 +1,6 @@
 #pragma once
 
-typedef unsigned int GLenum;
-typedef unsigned int GLuint;
+#include "glTypes.h"
 
 namespace Rendering
 {
@@ -28,6 +27,3 @@ namespace Rendering
         unsigned long long SizeInBytes = 0;
     };
 }
-
-#undef GLuint
-#undef GLenum

@@ -22,6 +22,11 @@ public:
                     double VerticalFOV = 45.0 );
 
     void SetProjectionMode(const ECameraProjectionMode& Mode);
+
+    // Width/Height mean different things depending on ProjectionMode: pixel dimensions in
+    // Perspective mode (only their ratio matters, for aspect ratio), but world-space frustum
+    // size in Orthographic mode (a centered/symmetric frustum -HalfWidth..HalfWidth,
+    // -HalfHeight..HalfHeight).
     void SetClipDimensions(double Width, double Height, double Near, double Far);
     void SetClipWidth(double Width);
     void SetClipHeight(double Height);

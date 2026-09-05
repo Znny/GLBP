@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "Transform.h"
+#include "Framebuffer.h"
 
 namespace Rendering { class ShaderProgram; }
 
@@ -34,14 +35,16 @@ public:
 
     void Initialize();
 
-    void SetMode(EGizmoMode NewMode) { Mode = NewMode; }
+    void SetMode(EGizmoMode NewMode);
     EGizmoMode GetMode() const { return Mode; }
 
-    void Draw(const Transform& Target, const glm::vec3& CameraLocation, const glm::mat4& ViewProjectionMatrix);
+    void Draw(const Transform& Target, const glm::vec3& CameraLocation);
 
     // Applies a single drag step to Target for the current Mode, along Axis, by Delta - world units for
     // Translate/Scale, degrees for Rotate. Dispatches to the mode-specific stub below.
     void ApplyTransformDelta(Transform& Target, EGizmoAxis Axis, float Delta) const;
+
+    GLuint GetShaderID() const;
 
 private:
     // TODO: translate Target along Axis (world-space) by Delta world units.
@@ -75,6 +78,7 @@ private:
     FGizmoMesh TranslateMesh;
     FGizmoMesh RotateMesh;
     FGizmoMesh ScaleMesh;
+    FGizmoMesh* CurrentMesh = nullptr;
 
     std::shared_ptr<Rendering::ShaderProgram> Shader;
     bool bInitialized = false;
