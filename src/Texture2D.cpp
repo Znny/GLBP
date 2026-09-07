@@ -74,17 +74,31 @@ namespace Rendering
         AllocateEmpty(InternalFormat, WrapMode);
     }
 
+    Texture2D::Texture2D(int InWidth, int InHeight, GLenum InternalFormat, GLsizei InSamples)
+        : Width(InWidth), Height(InHeight)
+    {
+        AllocateEmptyMultisample(InternalFormat, InSamples);
+    }
+
     void Texture2D::Resize(int NewWidth, int NewHeight, GLenum NewInternalFormat)
     {
         Width = NewWidth;
         Height = NewHeight;
         InternalFormat = NewInternalFormat;
 
-        const FUploadFormatAndType UploadFormat = UploadFormatForInternalFormat(InternalFormat);
+        glBindTexture(Target, TextureID);
 
-        glBindTexture(GL_TEXTURE_2D, TextureID);
-        glTexImage2D(GL_TEXTURE_2D, 0, (GLint)InternalFormat, Width, Height, 0, UploadFormat.Format, UploadFormat.Type, nullptr);
-        glBindTexture(GL_TEXTURE_2D, 0);
+        if(Target == GL_TEXTURE_2D_MULTISAMPLE)
+        {
+            glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, Samples, InternalFormat, Width, Height, GL_TRUE);
+        }
+        else
+        {
+            const FUploadFormatAndType UploadFormat = UploadFormatForInternalFormat(InternalFormat);
+            glTexImage2D(GL_TEXTURE_2D, 0, (GLint)InternalFormat, Width, Height, 0, UploadFormat.Format, UploadFormat.Type, nullptr);
+        }
+
+        glBindTexture(Target, 0);
     }
 
     Texture2D::~Texture2D()
@@ -98,7 +112,7 @@ namespace Rendering
 
     Texture2D::Texture2D(Texture2D&& Other) noexcept
         : TextureID(Other.TextureID), Width(Other.Width), Height(Other.Height), Channels(Other.Channels),
-          InternalFormat(Other.InternalFormat)
+          InternalFormat(Other.InternalFormat), Samples(Other.Samples), Target(Other.Target)
     {
         Other.TextureID = 0;
     }
@@ -117,6 +131,8 @@ namespace Rendering
             Height = Other.Height;
             Channels = Other.Channels;
             InternalFormat = Other.InternalFormat;
+            Samples = Other.Samples;
+            Target = Other.Target;
             Other.TextureID = 0;
         }
 
@@ -165,31 +181,61 @@ namespace Rendering
         glBindTexture(GL_TEXTURE_2D, 0);
     }
 
+    void Texture2D::AllocateEmptyMultisample(GLenum InInternalFormat, GLsizei InSamples)
+    {
+        InternalFormat = InInternalFormat;
+        Samples = InSamples;
+        Target = GL_TEXTURE_2D_MULTISAMPLE;
+
+        glGenTextures(1, &TextureID);
+        glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, TextureID);
+        glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, Samples, InternalFormat, Width, Height, GL_TRUE);
+        //deliberately no glTexParameteri calls here - filter/wrap/mipmap params are invalid on a
+        //multisample texture (there's nothing to filter or wrap between - every sample is its own texel)
+        glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
+    }
+
     void Texture2D::Bind(unsigned int TextureUnit) const
     {
         glActiveTexture(GL_TEXTURE0 + TextureUnit);
-        glBindTexture(GL_TEXTURE_2D, TextureID);
+        glBindTexture(Target, TextureID);
     }
 
     void Texture2D::Unbind() const
     {
-        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindTexture(Target, 0);
     }
 
     void Texture2D::SetMinifyingFunction(GLenum FilterFunction) const
     {
+        //GL_TEXTURE_MIN_FILTER is invalid on a multisample texture - see AllocateEmptyMultisample
+        if(Target == GL_TEXTURE_2D_MULTISAMPLE)
+        {
+            return;
+        }
+
         glBindTexture(GL_TEXTURE_2D, TextureID);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)FilterFunction);
     }
 
     void Texture2D::SetMagnifyingFunction(GLenum FilterFunction) const
     {
+        if(Target == GL_TEXTURE_2D_MULTISAMPLE)
+        {
+            return;
+        }
+
         glBindTexture(GL_TEXTURE_2D, TextureID);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)FilterFunction);
     }
 
     void Texture2D::SetWrapMode(GLenum Axis, GLenum WrapMode) const
     {
+        if(Target == GL_TEXTURE_2D_MULTISAMPLE)
+        {
+            return;
+        }
+
         glBindTexture(GL_TEXTURE_2D, TextureID);
         glTexParameteri(GL_TEXTURE_2D, Axis, (GLint)WrapMode);
     }

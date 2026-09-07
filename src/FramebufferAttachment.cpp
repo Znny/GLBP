@@ -34,6 +34,13 @@ namespace Rendering
         return backingTexture;
     }
 
+    GLenum FramebufferAttachment::GetGLTextureTarget() const
+    {
+        const bool bIsMultisampledTexture = attachmentSpec.AttachmentType == EFramebufferAttachmentType::Texture
+            && attachmentSpec.samples > 1;
+        return bIsMultisampledTexture ? GL_TEXTURE_2D_MULTISAMPLE : GL_TEXTURE_2D;
+    }
+
     FOnAttachmentIdChanged& FramebufferAttachment::GetOnAttachmentIdChangedDelegate()
     {
         return OnAttachmentIdChangedDelegate;
@@ -97,7 +104,14 @@ namespace Rendering
         }
         else
         {
-            backingTexture = new Texture2D(width, height, attachmentSpec.internalFormat);
+            if(attachmentSpec.samples > 1)
+            {
+                backingTexture = new Texture2D(width, height, attachmentSpec.internalFormat, attachmentSpec.samples);
+            }
+            else
+            {
+                backingTexture = new Texture2D(width, height, attachmentSpec.internalFormat);
+            }
             attachmentID = backingTexture->GetTextureID();
 
             //raw depth values must not be interpolated when sampled - GL_LINEAR/mipmaps would

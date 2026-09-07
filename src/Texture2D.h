@@ -13,6 +13,11 @@ namespace Rendering
     // but moved to glTypes.h since Framebuffer.h also needs them without including this header.
     constexpr GLenum DefaultTextureWrapMode = 0x2901;
 
+    // GL_TEXTURE_2D's value from the GL spec (0x0DE1) - same reasoning as DefaultTextureWrapMode
+    // above. Used as Texture2D::Target's default so every constructor but the multisample one
+    // (which overrides it to GL_TEXTURE_2D_MULTISAMPLE, 0x9100) doesn't need to think about it.
+    constexpr GLenum DefaultTextureTarget = 0x0DE1;
+
     class Texture2D
     {
     public:
@@ -30,6 +35,12 @@ namespace Rendering
         // gets rewritten every frame, so a mip chain would go stale immediately and building one would
         // be wasted work.
         Texture2D(int Width, int Height, GLenum InternalFormat = DefaultColorAttachmentFormat, GLenum WrapMode = DefaultTextureWrapMode);
+
+        // Allocates empty multisample GPU storage (GL_TEXTURE_2D_MULTISAMPLE, no pixel upload,
+        // no mipmaps/filter/wrap params - none of those are valid on a multisample texture) at
+        // Width x Height with the given sample count. For use as a multisampled Framebuffer color
+        // attachment; must be resolved (glBlitFramebuffer) before it can be sampled by a shader.
+        Texture2D(int Width, int Height, GLenum InternalFormat, GLsizei Samples);
 
         ~Texture2D();
 
@@ -79,11 +90,16 @@ namespace Rendering
     private:
         void Upload(const unsigned char* PixelData, GLenum WrapMode = DefaultTextureWrapMode);
         void AllocateEmpty(GLenum InInternalFormat, GLenum WrapMode);
+        void AllocateEmptyMultisample(GLenum InInternalFormat, GLsizei InSamples);
 
         GLuint TextureID = 0;
         int Width = 0;
         int Height = 0;
         int Channels = 0;
         GLenum InternalFormat = 0; // set by AllocateEmpty; unused for the file/pixel-upload constructors
+        GLsizei Samples = 0; // >0 only for a texture built via the multisample constructor
+        // GL_TEXTURE_2D for every constructor except the multisample one - kept as a member (rather
+        // than always assuming GL_TEXTURE_2D) so Bind/Unbind/Resize target the right binding point.
+        GLenum Target = DefaultTextureTarget;
     };
 }

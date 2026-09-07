@@ -106,8 +106,8 @@ const Rendering::FFramebufferSpec PerspectiveFramebufferSpec =
 {
     DefaultWidth,
     DefaultHeight,
-    {Rendering::DefaultTexturedFramebufferAttachment_Color,
-                Rendering::DefaultRenderBufferFramebufferAttachment_Depth}
+    {Rendering::DefaultRenderBufferFramebufferAttachment_MultisampleColor,
+                Rendering::DefaultRenderBufferFramebufferAttachment_MultisampleDepth}
 };
 
 constexpr int Viewport_Perspective = 0;
@@ -795,6 +795,9 @@ void Render(double dt)
         if(VP.ViewportFramebuffer)
         {
             VP.ViewportFramebuffer->Unbind();
+            //no-op unless this framebuffer's color attachment is multisampled - resolves it into
+            //a sampleable single-sample texture before CompositeFramebufferBackedViewports() reads it
+            VP.ViewportFramebuffer->ResolveMultisampledColor();
         }
         else
         {

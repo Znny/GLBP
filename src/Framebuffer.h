@@ -65,6 +65,13 @@ namespace Rendering
 
         void BindColorAttachment(unsigned int AttachmentPoint) const;
 
+        // Resolves this framebuffer's multisampled color attachment into ResolveTarget via
+        // glBlitFramebuffer, so BindColorAttachment() (and anything sampling ResolveTarget
+        // directly) sees this frame's fully-resolved result. No-op if the color attachment isn't
+        // multisampled (ResolveTarget is null in that case - see UpdateResolveTarget). Must be
+        // called once per frame after rendering into this framebuffer and before compositing.
+        void ResolveMultisampledColor() const;
+
         int GetWidth() const { return Width; }
         int GetHeight() const { return Height; }
 
@@ -87,9 +94,25 @@ namespace Rendering
         // Bound (via TDelegate::BindRaw) to each attachment's FOnAttachmentIdChanged delegate.
         void OnAttachmentIdChanged(FramebufferAttachment* Attachment);
 
+        // Finds this framebuffer's GL_COLOR_ATTACHMENT0 spec, or nullptr if it has none.
+        const FFramebufferAttachmentSpec* FindColorAttachmentSpec() const;
+
+        // Keeps ResolveTarget in sync with the color attachment: creates it (single-sample Texture
+        // Color attachment matching the source's internalFormat, at Width x Height) if the color
+        // attachment is multisampled and ResolveTarget doesn't exist yet, resizes it if it already
+        // does, or tears it down if the color attachment is no longer multisampled. Called after
+        // construction and whenever Width/Height or the attachment list changes.
+        void UpdateResolveTarget();
+
         GLuint FramebufferID = 0;
         int Width = 0;
         int Height = 0;
         std::vector<std::unique_ptr<FramebufferAttachment>> Attachments;
+
+        // Single-sample mirror of this framebuffer's color attachment, populated by
+        // ResolveMultisampledColor() - null whenever the color attachment isn't multisampled (see
+        // UpdateResolveTarget). BindColorAttachment() reads from this instead of Attachments
+        // whenever it's present, since a multisampled attachment can't be sampled directly.
+        std::unique_ptr<Framebuffer> ResolveTarget;
     };
 }

@@ -27,6 +27,13 @@ namespace Rendering
                     GL_DEPTH_COMPONENT,
                     1
             };
+    const FFramebufferAttachmentSpec DefaultRenderBufferFramebufferAttachment_MultisampleDepth
+            {
+                    Rendering::EFramebufferAttachmentType::Renderbuffer,
+                    GL_DEPTH_ATTACHMENT,
+                    GL_DEPTH_COMPONENT,
+                    4
+            };
     const FFramebufferAttachmentSpec DefaultRenderBufferFramebufferAttachment_Stencil
             {
                     Rendering::EFramebufferAttachmentType::Renderbuffer,

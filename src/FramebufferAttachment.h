@@ -34,6 +34,7 @@ namespace Rendering
     extern const FFramebufferAttachmentSpec DefaultRenderBufferFramebufferAttachment_Color;
     extern const FFramebufferAttachmentSpec DefaultRenderBufferFramebufferAttachment_MultisampleColor;
     extern const FFramebufferAttachmentSpec DefaultRenderBufferFramebufferAttachment_Depth;
+    extern const FFramebufferAttachmentSpec DefaultRenderBufferFramebufferAttachment_MultisampleDepth;
     extern const FFramebufferAttachmentSpec DefaultRenderBufferFramebufferAttachment_Stencil;
     extern const FFramebufferAttachmentSpec DefaultRenderBufferFramebufferAttachment_DepthStencil;
     extern const FFramebufferAttachmentSpec DefaultTexturedFramebufferAttachment_Color;
@@ -68,6 +69,10 @@ namespace Rendering
         GLuint GetAttachmentID() const;
 
         Rendering::Texture2D* GetBackingTexture() const;
+
+        // GL_TEXTURE_2D_MULTISAMPLE for a multisampled Texture attachment, GL_TEXTURE_2D
+        // otherwise - the textarget glFramebufferTexture2D needs when attaching this.
+        GLenum GetGLTextureTarget() const;
 
         FOnAttachmentIdChanged& GetOnAttachmentIdChangedDelegate();
 

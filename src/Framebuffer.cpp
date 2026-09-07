@@ -19,6 +19,8 @@ namespace Rendering
         {
             AddAttachment(AttachmentSpec);
         }
+
+        UpdateResolveTarget();
     }
 
     Framebuffer::~Framebuffer()
@@ -57,6 +59,8 @@ namespace Rendering
         {
             Attachment->Resize(Width, Height);
         }
+
+        UpdateResolveTarget();
     }
 
     void Framebuffer::AddAttachment(const FFramebufferAttachmentSpec& AttachmentSpec)
@@ -96,6 +100,8 @@ namespace Rendering
                         return Spec.AttachmentPoint == AttachmentPoint;
                     });
             }), Attachments.end());
+
+        UpdateResolveTarget();
     }
 
     void Framebuffer::AttachToFramebuffer(FramebufferAttachment& Attachment) const
@@ -109,7 +115,7 @@ namespace Rendering
         }
         else
         {
-            glFramebufferTexture2D(GL_FRAMEBUFFER, Spec.AttachmentPoint, GL_TEXTURE_2D, Attachment.GetAttachmentID(), 0);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, Spec.AttachmentPoint, Attachment.GetGLTextureTarget(), Attachment.GetAttachmentID(), 0);
         }
 
         if(glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
@@ -127,6 +133,14 @@ namespace Rendering
 
     void Framebuffer::BindColorAttachment(unsigned int TextureUnit) const
     {
+        //a multisampled color attachment can't be sampled directly - bind the resolved copy
+        //instead (see ResolveMultisampledColor/UpdateResolveTarget)
+        if(ResolveTarget)
+        {
+            ResolveTarget->BindColorAttachment(TextureUnit);
+            return;
+        }
+
         for(const auto& Attachment : Attachments)
         {
             if(Attachment->GetSpecReference().AttachmentPoint == GL_COLOR_ATTACHMENT0)
@@ -135,6 +149,58 @@ namespace Rendering
                 glBindTexture(GL_TEXTURE_2D, Attachment->GetBackingTexture()->GetTextureID());;
                 return;
             }
+        }
+    }
+
+    void Framebuffer::ResolveMultisampledColor() const
+    {
+        if(!ResolveTarget)
+        {
+            return;
+        }
+
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, FramebufferID);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, ResolveTarget->FramebufferID);
+        glBlitFramebuffer(0, 0, Width, Height, 0, 0, Width, Height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+
+    const FFramebufferAttachmentSpec* Framebuffer::FindColorAttachmentSpec() const
+    {
+        for(const auto& Attachment : Attachments)
+        {
+            if(Attachment->GetSpecReference().AttachmentPoint == GL_COLOR_ATTACHMENT0)
+            {
+                return &Attachment->GetSpecReference();
+            }
+        }
+
+        return nullptr;
+    }
+
+    void Framebuffer::UpdateResolveTarget()
+    {
+        const FFramebufferAttachmentSpec* ColorSpec = FindColorAttachmentSpec();
+        const bool bNeedsResolve = ColorSpec != nullptr && ColorSpec->samples > 1;
+
+        if(!bNeedsResolve)
+        {
+            ResolveTarget.reset();
+            return;
+        }
+
+        if(!ResolveTarget)
+        {
+            const FFramebufferSpec ResolveSpec
+            {
+                Width, Height,
+                {FFramebufferAttachmentSpec{EFramebufferAttachmentType::Texture, GL_COLOR_ATTACHMENT0, ColorSpec->internalFormat, 1}}
+            };
+            ResolveTarget = std::make_unique<Framebuffer>(ResolveSpec);
+        }
+        else
+        {
+            ResolveTarget->Resize(Width, Height);
         }
     }
 
