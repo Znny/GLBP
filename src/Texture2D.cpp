@@ -4,8 +4,8 @@
 
 #include <stb/stb_image.h>
 
-#include "myc/logging/logging.h"
-#include "myc/paths/paths.h"
+#include "gear/logging/logging.h"
+#include "gear/paths/paths.h"
 
 namespace
 {
@@ -49,7 +49,7 @@ namespace Rendering
     {
         stbi_set_flip_vertically_on_load(true);
 
-        const std::string FullPath = myc::GetExecutableDir() + Filename;
+        const std::string FullPath = gear::GetExecutableDir() + Filename;
 
         unsigned char* PixelData = stbi_load(FullPath.c_str(), &Width, &Height, &Channels, 0);
         if(!PixelData)

@@ -40,8 +40,8 @@
 #include "Grid.h"
 #include "SSTextRenderer.h"
 #include "ConfigManager.h"
-#include "myc/logging/logging.h"
-#include "myc/paths/paths.h"
+#include "gear/logging/logging.h"
+#include "gear/paths/paths.h"
 #include "FramebufferAttachment.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <cstring>
@@ -71,6 +71,9 @@ void WindowResizeEventCallback(GLFWwindow* Window, int NewWidth, int NewHeight);
 void ErrorCallback(int error, const char* description);
 
 void Cleanup();
+
+std::unique_ptr<Rendering::VertexArray> CreateHexTorusVertexArray(float InnerRadius, float OuterRadius, int SideCount, float HalfDepth);
+std::unique_ptr<Rendering::VertexArray> CreateTexturedCubeVertexArray(float HalfSize, float OffsetX);
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //main window for the sim
@@ -301,7 +304,7 @@ bool Init(int argc, char** argv, char** envp)
         }
     }
 
-    ConfigManager::Get().LoadFromFile(myc::GetExecutableDir() + "/config/default.conf");
+    ConfigManager::Get().LoadFromFile(gear::GetExecutableDir() + "/config/default.conf");
 
     if(!InitGraphics())
     {
@@ -316,6 +319,110 @@ bool Init(int argc, char** argv, char** envp)
     LogInfo("initialization successful.\n");
 
     return true;
+}
+
+//builds the hexagonal torus ("hex nut") geometry - a hexagonal ring extruded along Z into a solid
+//loop (front/back faces plus inner/outer walls) - and returns it as a ready-to-draw VertexArray.
+//4 verts per side (outer/inner rim, front/back face), indexed - not a single continuous triangle
+//strip like the old flat version, since front/back/inner-wall/outer-wall can't be expressed as one
+//strip without degenerate triangles; GL_TRIANGLES is simpler and clearer here.
+std::unique_ptr<Rendering::VertexArray> CreateHexTorusVertexArray(float InnerRadius, float OuterRadius, int SideCount, float HalfDepth)
+{
+    std::vector<float> HexVerts; //interleaved {x,y,z, r,g,b}
+    std::vector<GLuint> HexIndices;
+
+    for(int Side = 0; Side < SideCount; Side++)
+    {
+        const float Angle = glm::radians(360.0f * (float)Side / (float)SideCount);
+        const float CosA = cosf(Angle);
+        const float SinA = sinf(Angle);
+
+        //vertex order per side: 0=OuterFront, 1=InnerFront, 2=OuterBack, 3=InnerBack
+        HexVerts.insert(HexVerts.end(), {OuterRadius * CosA, OuterRadius * SinA,  HalfDepth, 1.0f, 0.6f, 0.0f});
+        HexVerts.insert(HexVerts.end(), {InnerRadius * CosA, InnerRadius * SinA,  HalfDepth, 1.0f, 0.6f, 0.0f});
+        HexVerts.insert(HexVerts.end(), {OuterRadius * CosA, OuterRadius * SinA, -HalfDepth, 1.0f, 0.6f, 0.0f});
+        HexVerts.insert(HexVerts.end(), {InnerRadius * CosA, InnerRadius * SinA, -HalfDepth, 1.0f, 0.6f, 0.0f});
+    }
+
+    //winding verified by hand (CCW as seen from each face's outward direction) for all 4 parts
+    for(int Side = 0; Side < SideCount; Side++)
+    {
+        const int Next = (Side + 1) % SideCount;
+        const GLuint OuterFront = (GLuint)(Side * 4 + 0), InnerFront = (GLuint)(Side * 4 + 1);
+        const GLuint OuterBack  = (GLuint)(Side * 4 + 2), InnerBack  = (GLuint)(Side * 4 + 3);
+        const GLuint NextOuterFront = (GLuint)(Next * 4 + 0), NextInnerFront = (GLuint)(Next * 4 + 1);
+        const GLuint NextOuterBack  = (GLuint)(Next * 4 + 2), NextInnerBack  = (GLuint)(Next * 4 + 3);
+
+        //front face (+Z outward): OuterFront, NextOuterFront, NextInnerFront, InnerFront
+        HexIndices.insert(HexIndices.end(), {OuterFront, NextOuterFront, NextInnerFront, NextInnerFront, InnerFront, OuterFront});
+        //back face (-Z outward, reversed relative to front): InnerBack, NextInnerBack, NextOuterBack, ...
+        HexIndices.insert(HexIndices.end(), {InnerBack, NextInnerBack, NextOuterBack, NextOuterBack, OuterBack, InnerBack});
+        //outer wall (radially outward): OuterFront, OuterBack, NextOuterBack, ...
+        HexIndices.insert(HexIndices.end(), {OuterFront, OuterBack, NextOuterBack, NextOuterBack, NextOuterFront, OuterFront});
+        //inner wall (radially inward, into the hole): InnerFront, NextInnerFront, NextInnerBack, ...
+        HexIndices.insert(HexIndices.end(), {InnerFront, NextInnerFront, NextInnerBack, NextInnerBack, InnerBack, InnerFront});
+    }
+
+    auto Result = std::make_unique<Rendering::VertexArray>();
+    Result->AddVertexBuffer(
+        Rendering::VertexBuffer(HexVerts.data(), HexVerts.size() * sizeof(float), GL_STATIC_DRAW),
+        {
+            Rendering::FVertexAttribute{0, 3, GL_FLOAT, false},
+            Rendering::FVertexAttribute{1, 3, GL_FLOAT, false}
+        },
+        6 * sizeof(float));
+    Result->SetIndexBuffer(Rendering::IndexBuffer(HexIndices.data(), (unsigned int)HexIndices.size(), GL_STATIC_DRAW));
+    return Result;
+}
+
+//builds a cube's geometry (positions + UVs) and returns it as a ready-to-draw VertexArray, for the
+//textured cube demonstrating Texture2D. 6 faces x 4 corners, each face's own 4 verts (not shared
+//cube corners) so each face gets its own full 0..1 UV range - sharing corners across faces would
+//need ambiguous per-vertex UVs, since a cube corner is part of 3 differently-UV'd faces. Corner
+//order per face is CCW as seen from outside (verified by hand via cross product against each face's
+//own normal).
+std::unique_ptr<Rendering::VertexArray> CreateTexturedCubeVertexArray(float HalfSize, float OffsetX)
+{
+    struct FCubeFace { glm::vec3 Corners[4]; };
+    const FCubeFace CubeFaces[6] =
+    {
+        {{ {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1} }}, //+Z front
+        {{ { 1,-1,-1}, {-1,-1,-1}, {-1, 1,-1}, { 1, 1,-1} }}, //-Z back
+        {{ { 1,-1, 1}, { 1,-1,-1}, { 1, 1,-1}, { 1, 1, 1} }}, //+X right
+        {{ {-1,-1,-1}, {-1,-1, 1}, {-1, 1, 1}, {-1, 1,-1} }}, //-X left
+        {{ {-1, 1, 1}, { 1, 1, 1}, { 1, 1,-1}, {-1, 1,-1} }}, //+Y top
+        {{ {-1,-1,-1}, { 1,-1,-1}, { 1,-1, 1}, {-1,-1, 1} }}, //-Y bottom
+    };
+    const glm::vec2 FaceUVs[4] = { {0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f} };
+
+    //interleaved {x,y,z, u,v} per vertex
+    std::vector<float> CubeVerts;
+    std::vector<GLuint> CubeIndices;
+    for(int Face = 0; Face < 6; Face++)
+    {
+        for(int Corner = 0; Corner < 4; Corner++)
+        {
+            const glm::vec3& C = CubeFaces[Face].Corners[Corner];
+            CubeVerts.insert(CubeVerts.end(),
+            {
+                OffsetX + C.x * HalfSize, C.y * HalfSize, C.z * HalfSize,
+                FaceUVs[Corner].x, FaceUVs[Corner].y
+            });
+        }
+        const GLuint Base = (GLuint)(Face * 4);
+        CubeIndices.insert(CubeIndices.end(), {Base, Base + 1, Base + 2, Base + 2, Base + 3, Base});
+    }
+
+    auto Result = std::make_unique<Rendering::VertexArray>();
+    Result->AddVertexBuffer(
+        Rendering::VertexBuffer(CubeVerts.data(), CubeVerts.size() * sizeof(float), GL_STATIC_DRAW),
+        {
+            Rendering::FVertexAttribute{0, 3, GL_FLOAT, false},
+            Rendering::FVertexAttribute{1, 2, GL_FLOAT, false}
+        },
+        5 * sizeof(float));
+    Result->SetIndexBuffer(Rendering::IndexBuffer(CubeIndices.data(), (unsigned int)CubeIndices.size(), GL_STATIC_DRAW));
+    return Result;
 }
 
 bool InitGraphics()
@@ -402,53 +509,7 @@ bool InitGraphics()
         constexpr int SideCount = 6;
         constexpr float HalfDepth = 0.5f; //full depth 1.0, matching the ring's radial width (Outer-Inner)
 
-        //4 verts per side (outer/inner rim, front/back face), indexed - not a single continuous
-        //triangle strip like the old flat version, since front/back/inner-wall/outer-wall can't be
-        //expressed as one strip without degenerate triangles; GL_TRIANGLES is simpler and clearer here
-        std::vector<float> HexVerts; //interleaved {x,y,z, r,g,b}
-        std::vector<GLuint> HexIndices;
-
-        for(int Side = 0; Side < SideCount; Side++)
-        {
-            const float Angle = glm::radians(360.0f * (float)Side / (float)SideCount);
-            const float CosA = cosf(Angle);
-            const float SinA = sinf(Angle);
-
-            //vertex order per side: 0=OuterFront, 1=InnerFront, 2=OuterBack, 3=InnerBack
-            HexVerts.insert(HexVerts.end(), {OuterRadius * CosA, OuterRadius * SinA,  HalfDepth, 1.0f, 0.6f, 0.0f});
-            HexVerts.insert(HexVerts.end(), {InnerRadius * CosA, InnerRadius * SinA,  HalfDepth, 1.0f, 0.6f, 0.0f});
-            HexVerts.insert(HexVerts.end(), {OuterRadius * CosA, OuterRadius * SinA, -HalfDepth, 1.0f, 0.6f, 0.0f});
-            HexVerts.insert(HexVerts.end(), {InnerRadius * CosA, InnerRadius * SinA, -HalfDepth, 1.0f, 0.6f, 0.0f});
-        }
-
-        //winding verified by hand (CCW as seen from each face's outward direction) for all 4 parts
-        for(int Side = 0; Side < SideCount; Side++)
-        {
-            const int Next = (Side + 1) % SideCount;
-            const GLuint OuterFront = (GLuint)(Side * 4 + 0), InnerFront = (GLuint)(Side * 4 + 1);
-            const GLuint OuterBack  = (GLuint)(Side * 4 + 2), InnerBack  = (GLuint)(Side * 4 + 3);
-            const GLuint NextOuterFront = (GLuint)(Next * 4 + 0), NextInnerFront = (GLuint)(Next * 4 + 1);
-            const GLuint NextOuterBack  = (GLuint)(Next * 4 + 2), NextInnerBack  = (GLuint)(Next * 4 + 3);
-
-            //front face (+Z outward): OuterFront, NextOuterFront, NextInnerFront, InnerFront
-            HexIndices.insert(HexIndices.end(), {OuterFront, NextOuterFront, NextInnerFront, NextInnerFront, InnerFront, OuterFront});
-            //back face (-Z outward, reversed relative to front): InnerBack, NextInnerBack, NextOuterBack, ...
-            HexIndices.insert(HexIndices.end(), {InnerBack, NextInnerBack, NextOuterBack, NextOuterBack, OuterBack, InnerBack});
-            //outer wall (radially outward): OuterFront, OuterBack, NextOuterBack, ...
-            HexIndices.insert(HexIndices.end(), {OuterFront, OuterBack, NextOuterBack, NextOuterBack, NextOuterFront, OuterFront});
-            //inner wall (radially inward, into the hole): InnerFront, NextInnerFront, NextInnerBack, ...
-            HexIndices.insert(HexIndices.end(), {InnerFront, NextInnerFront, NextInnerBack, NextInnerBack, InnerBack, InnerFront});
-        }
-
-        HexTorus = std::make_unique<Rendering::VertexArray>();
-        HexTorus->AddVertexBuffer(
-            Rendering::VertexBuffer(HexVerts.data(), HexVerts.size() * sizeof(float), GL_STATIC_DRAW),
-            {
-                Rendering::FVertexAttribute{0, 3, GL_FLOAT, false},
-                Rendering::FVertexAttribute{1, 3, GL_FLOAT, false}
-            },
-            6 * sizeof(float));
-        HexTorus->SetIndexBuffer(Rendering::IndexBuffer(HexIndices.data(), (unsigned int)HexIndices.size(), GL_STATIC_DRAW));
+        HexTorus = CreateHexTorusVertexArray(InnerRadius, OuterRadius, SideCount, HalfDepth);
     }
 
     //textured cube off to the side of the tetrahedron/hex-torus, proving out Texture2D - same
@@ -480,49 +541,7 @@ bool InitGraphics()
         constexpr float CubeHalfSize = 0.6f;
         constexpr float CubeOffsetX = 5.7f;
 
-        //6 faces x 4 corners, each face's own 4 verts (not shared cube corners) so each face gets
-        //its own full 0..1 UV range - sharing corners across faces would need ambiguous per-vertex
-        //UVs, since a cube corner is part of 3 differently-UV'd faces. Corner order per face is CCW
-        //as seen from outside (verified by hand via cross product against each face's own normal).
-        struct FCubeFace { glm::vec3 Corners[4]; };
-        const FCubeFace CubeFaces[6] =
-        {
-            {{ {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1} }}, //+Z front
-            {{ { 1,-1,-1}, {-1,-1,-1}, {-1, 1,-1}, { 1, 1,-1} }}, //-Z back
-            {{ { 1,-1, 1}, { 1,-1,-1}, { 1, 1,-1}, { 1, 1, 1} }}, //+X right
-            {{ {-1,-1,-1}, {-1,-1, 1}, {-1, 1, 1}, {-1, 1,-1} }}, //-X left
-            {{ {-1, 1, 1}, { 1, 1, 1}, { 1, 1,-1}, {-1, 1,-1} }}, //+Y top
-            {{ {-1,-1,-1}, { 1,-1,-1}, { 1,-1, 1}, {-1,-1, 1} }}, //-Y bottom
-        };
-        const glm::vec2 FaceUVs[4] = { {0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f} };
-
-        //interleaved {x,y,z, u,v} per vertex
-        std::vector<float> CubeVerts;
-        std::vector<GLuint> CubeIndices;
-        for(int Face = 0; Face < 6; Face++)
-        {
-            for(int Corner = 0; Corner < 4; Corner++)
-            {
-                const glm::vec3& C = CubeFaces[Face].Corners[Corner];
-                CubeVerts.insert(CubeVerts.end(),
-                {
-                    CubeOffsetX + C.x * CubeHalfSize, C.y * CubeHalfSize, C.z * CubeHalfSize,
-                    FaceUVs[Corner].x, FaceUVs[Corner].y
-                });
-            }
-            const GLuint Base = (GLuint)(Face * 4);
-            CubeIndices.insert(CubeIndices.end(), {Base, Base + 1, Base + 2, Base + 2, Base + 3, Base});
-        }
-
-        TexturedCube = std::make_unique<Rendering::VertexArray>();
-        TexturedCube->AddVertexBuffer(
-            Rendering::VertexBuffer(CubeVerts.data(), CubeVerts.size() * sizeof(float), GL_STATIC_DRAW),
-            {
-                Rendering::FVertexAttribute{0, 3, GL_FLOAT, false},
-                Rendering::FVertexAttribute{1, 2, GL_FLOAT, false}
-            },
-            5 * sizeof(float));
-        TexturedCube->SetIndexBuffer(Rendering::IndexBuffer(CubeIndices.data(), (unsigned int)CubeIndices.size(), GL_STATIC_DRAW));
+        TexturedCube = CreateTexturedCubeVertexArray(CubeHalfSize, CubeOffsetX);
     }
 
     //setup the camera: perspective projection matching the window, positioned back from the origin and looking at it

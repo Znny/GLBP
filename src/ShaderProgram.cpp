@@ -3,7 +3,7 @@
 //
 
 #include "glad/glad.h"
-#include "myc/logging/logging.h"
+#include "gear/logging/logging.h"
 #include "ShaderObject.h"
 #include "ShaderProgram.h"
 

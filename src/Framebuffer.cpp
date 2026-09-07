@@ -4,7 +4,7 @@
 
 #include "glad/glad.h"
 
-#include "myc/logging/logging.h"
+#include "gear/logging/logging.h"
 #include "FramebufferAttachment.h"
 #include "Texture2D.h"
 
