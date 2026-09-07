@@ -37,6 +37,7 @@
 #include "FrameConstants.h"
 #include "Camera.h"
 #include "Gizmo.h"
+#include "Grid.h"
 #include "SSTextRenderer.h"
 #include "ConfigManager.h"
 #include "myc/logging/logging.h"
@@ -60,6 +61,7 @@ void Render(double DeltaTime);
 void ProcessInput();
 void RecomputeViewportQuadrants(int WindowWidth, int WindowHeight);
 void CompositeFramebufferBackedViewports();
+void DrawViewportBorders();
 void UpdateCameraMovement(GLFWwindow* Window, double DeltaTime);
 void KeyboardEventCallback(GLFWwindow* Window, int KeyCode, int ScanCode, int Action, int Modifiers);
 void MouseButtonEventCallback(GLFWwindow* Window, int Button, int Action, int Modifiers);
@@ -81,6 +83,10 @@ constexpr int DefaultHeight = 1080;
 //viewport cameras - see RecomputeViewportQuadrants
 constexpr double OrthoClipSize = 16.0;
 
+//pixel gap left between quadrants in multi-view mode, filled in by DrawViewportBorders() - see
+//RecomputeViewportQuadrants
+constexpr int ViewportBorderThickness = 2;
+
 static int Width = DefaultWidth;
 static int Height = DefaultHeight;
 
@@ -99,6 +105,12 @@ struct FViewport
     Camera ViewportCamera;
     std::unique_ptr<Rendering::Framebuffer> ViewportFramebuffer;
     int QuadrantX = 0, QuadrantY = 0, QuadrantWidth = 0, QuadrantHeight = 0; // pixel-space, GL bottom-left origin
+
+    // Orthonormal basis spanning this viewport's reference grid plane (its normal is their cross
+    // product) - see Grid::Draw. Defaults to the XZ/ground plane, shared by Perspective and Top;
+    // Front/Right override this at setup below to match the plane they actually look across.
+    glm::vec3 GridTangent = glm::vec3(1.0f, 0.0f, 0.0f);
+    glm::vec3 GridBitangent = glm::vec3(0.0f, 0.0f, 1.0f);
 };
 
 //Rendering::FramebufferAttachmentSpec
@@ -126,6 +138,10 @@ Camera& MainCamera = Viewports[Viewport_Perspective].ViewportCamera;
 //gizmo, and the transform it's currently visualizing
 TransformGizmo Gizmo;
 Transform GizmoTargetTransform;
+
+//reference grid, shared across all 4 viewports (see Grid.h) - each Draw() call is parameterized
+//by that viewport's FViewport::GridTangent/GridBitangent
+Grid ViewportGrid;
 
 //screen-space texts
 SSTextRenderer TextRenderer;
@@ -331,6 +347,9 @@ bool InitGraphics()
     //create the transform gizmo's shader and generated axis/ring/box meshes
     Gizmo.Initialize();
 
+    //create the reference grid's shader and shared NDC quad
+    ViewportGrid.Initialize();
+
     FrameConstantsUBO = std::make_unique<Rendering::UniformBuffer>(sizeof(Rendering::FFrameConstants), GL_DYNAMIC_DRAW);
     FrameConstantsUBO->BindToPoint(Rendering::FrameConstantsBindingPoint);
     Rendering::BindFrameConstantsBlock(TexturedShaderProgram->GetProgramID());
@@ -527,10 +546,14 @@ bool InitGraphics()
     Viewports[Viewport_Front].ViewportCamera = Camera(OrthoClipSize, OrthoClipSize, 0.1, 1000.0, ECameraProjectionMode::Orthographic);
     Viewports[Viewport_Front].ViewportCamera.SetLocation(glm::vec3(0.0f, 0.0f, (float)OrthoDistance));
     //no rotation needed - identity already looks down -Z toward the origin, same as MainCamera's default
+    Viewports[Viewport_Front].GridTangent = glm::vec3(1.0f, 0.0f, 0.0f);   //X
+    Viewports[Viewport_Front].GridBitangent = glm::vec3(0.0f, 1.0f, 0.0f); //Y - grid lies in the XY plane this camera looks across
 
     Viewports[Viewport_Right].ViewportCamera = Camera(OrthoClipSize, OrthoClipSize, 0.1, 1000.0, ECameraProjectionMode::Orthographic);
     Viewports[Viewport_Right].ViewportCamera.SetLocation(glm::vec3((float)OrthoDistance, 0.0f, 0.0f));
     Viewports[Viewport_Right].ViewportCamera.SetRotation(glm::vec3(0.0f, 90.0f, 0.0f)); //yaw to look down -X
+    Viewports[Viewport_Right].GridTangent = glm::vec3(0.0f, 1.0f, 0.0f);   //Y
+    Viewports[Viewport_Right].GridBitangent = glm::vec3(0.0f, 0.0f, 1.0f); //Z - grid lies in the YZ plane this camera looks across
 
     RecomputeViewportQuadrants(Width, Height);
 
@@ -710,9 +733,9 @@ void Render(double dt)
     //smoke test for the ImGui integration - gets replaced by real tool panels (shader playground, etc.) later
     ImGui::ShowDemoWindow();
 
-    const double Red = cos(ThisFrameTime);
-    const double Green = cos(ThisFrameTime);
-    const double Blue = cos(ThisFrameTime);
+    const double Red = 0.0f;//cos(ThisFrameTime);
+    const double Green = 0.0f;//cos(ThisFrameTime);
+    const double Blue = 0.0f;//cos(ThisFrameTime);
 
     //in single-view mode only the perspective camera (index 0) renders, fullscreen; in multi-view
     //mode all 4 render, each confined to its own screen quadrant
@@ -788,6 +811,11 @@ void Render(double dt)
             TexturedCube->Draw(GL_TRIANGLES);
         }
 
+        //reference grid, occluded by/occluding the scene geometry above via its analytic
+        //gl_FragDepth write (see resource/grid.fs) - drawn before the gizmo so the gizmo (which
+        //disables depth testing) still overlays on top of it
+        ViewportGrid.Draw(VP.ViewportCamera, VP.GridTangent, VP.GridBitangent);
+
         //gizmo stays perspective-only - drawn here (not after the loop) so it's naturally
         //confined to the perspective viewport's own rect/scissor in multi-view mode too
         Gizmo.Draw(GizmoTargetTransform, VP.ViewportCamera.GetLocation());
@@ -807,6 +835,7 @@ void Render(double dt)
 
     glViewport(0, 0, Width, Height); //restore full-window viewport before compositing/HUD/ImGui
     CompositeFramebufferBackedViewports(); //perspective viewport has a Framebuffer now, but the blit is still a stub - see FViewport's comment
+    DrawViewportBorders();
 
     //draw a small screen-space HUD showing the active gizmo mode and hotkeys
     const char* ModeName = "Translate (W)";
@@ -1065,11 +1094,18 @@ void RecomputeViewportQuadrants(int WindowWidth, int WindowHeight)
     const int HalfWidth = WindowWidth / 2, HalfHeight = WindowHeight / 2;
     const int RemWidth = WindowWidth - HalfWidth, RemHeight = WindowHeight - HalfHeight; //odd leftover pixel goes to the right/top
 
+    //ViewportBorderThickness is carved out of the two quadrants on either side of each shared
+    //boundary (not the outer window edges) - split so an odd thickness still tiles exactly, with
+    //DrawViewportBorders() filling the resulting gap. NearBorder trims the edge touching the
+    //boundary from below/left, FarBorder trims it from above/right; NearBorder+FarBorder == ViewportBorderThickness.
+    const int NearBorder = ViewportBorderThickness / 2;
+    const int FarBorder = ViewportBorderThickness - NearBorder;
+
     //2x2 grid: top-left Perspective, top-right Top, bottom-left Front, bottom-right Right
-    const int QuadX[ViewportCount] = { 0, HalfWidth, 0, HalfWidth };
-    const int QuadY[ViewportCount] = { HalfHeight, HalfHeight, 0, 0 };
-    const int QuadW[ViewportCount] = { HalfWidth, RemWidth, HalfWidth, RemWidth };
-    const int QuadH[ViewportCount] = { RemHeight, RemHeight, HalfHeight, HalfHeight };
+    const int QuadX[ViewportCount] = { 0, HalfWidth + FarBorder, 0, HalfWidth + FarBorder };
+    const int QuadY[ViewportCount] = { HalfHeight + FarBorder, HalfHeight + FarBorder, 0, 0 };
+    const int QuadW[ViewportCount] = { HalfWidth - NearBorder, RemWidth - FarBorder, HalfWidth - NearBorder, RemWidth - FarBorder };
+    const int QuadH[ViewportCount] = { RemHeight - FarBorder, RemHeight - FarBorder, HalfHeight - NearBorder, HalfHeight - NearBorder };
 
     for(int i = 0; i < ViewportCount; i++)
     {
@@ -1144,6 +1180,41 @@ void CompositeFramebufferBackedViewports()
     }
 
     glEnable(GL_DEPTH_TEST); //restore the app-wide invariant everything else relies on
+}
+
+// Fills the cross-shaped gap RecomputeViewportQuadrants() leaves between the 4 quadrants (see
+// ViewportBorderThickness) with a solid border color, via glScissor+glClear - the same technique
+// Render() already uses to confine each quadrant's own clear. No-op outside multi-view mode, since
+// there's only one viewport (and no gap) then.
+void DrawViewportBorders()
+{
+    if(!bMultiViewMode)
+    {
+        return;
+    }
+
+    const glm::vec3 BorderColor(0.05f, 0.05f, 0.05f);
+
+    glEnable(GL_SCISSOR_TEST);
+    glClearColor(BorderColor.r, BorderColor.g, BorderColor.b, 1.0f);
+
+    //vertical gap: full window height, between the left and right columns of quadrants
+    const FViewport& LeftColumn = Viewports[Viewport_Perspective];
+    const FViewport& RightColumn = Viewports[Viewport_Top];
+    const int VerticalGapX = LeftColumn.QuadrantX + LeftColumn.QuadrantWidth;
+    const int VerticalGapWidth = RightColumn.QuadrantX - VerticalGapX;
+    glScissor(VerticalGapX, 0, VerticalGapWidth, Height);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    //horizontal gap: full window width, between the top and bottom rows of quadrants
+    const FViewport& BottomRow = Viewports[Viewport_Front];
+    const FViewport& TopRow = Viewports[Viewport_Perspective];
+    const int HorizontalGapY = BottomRow.QuadrantY + BottomRow.QuadrantHeight;
+    const int HorizontalGapHeight = TopRow.QuadrantY - HorizontalGapY;
+    glScissor(0, HorizontalGapY, Width, HorizontalGapHeight);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glDisable(GL_SCISSOR_TEST);
 }
 
 void UpdateTiming(GLFWwindow* window)

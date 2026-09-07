@@ -61,6 +61,7 @@ add_executable(GLBP
         src/Transform.cpp
         src/Camera.cpp
         src/Gizmo.cpp
+        src/Grid.cpp
         src/SSTextRenderer.cpp
         src/stb_truetype_impl.cpp
         src/Texture2D.cpp
