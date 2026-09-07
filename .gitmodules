@@ -1,6 +1,6 @@
-[submodule "extern/myc"]
-	path = extern/myc
-	url = git@github.com:Znny/myc.git
+[submodule "extern/gear"]
+	path = extern/gear
+	url = git@github.com:Znny/gear.git
 	branch = main
 [submodule "extern/imgui"]
 	path = extern/imgui
