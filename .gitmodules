@@ -1,8 +1,8 @@
-[submodule "extern/gear"]
-	path = extern/gear
-	url = git@github.com:Znny/gear.git
-	branch = main
 [submodule "extern/imgui"]
 	path = extern/imgui
 	url = https://github.com/ocornut/imgui.git
 	branch = docking
+[submodule "extern/gear"]
+	path = extern/gear
+	url = https://github.com/Znny/gear.git
+	branch = main
