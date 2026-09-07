@@ -6,6 +6,7 @@
 
 #include "myc/logging/logging.h"
 #include "FramebufferAttachment.h"
+#include "Texture2D.h"
 
 namespace Rendering
 {
@@ -123,4 +124,18 @@ namespace Rendering
     {
         AttachToFramebuffer(*Attachment);
     }
+
+    void Framebuffer::BindColorAttachment(unsigned int TextureUnit) const
+    {
+        for(const auto& Attachment : Attachments)
+        {
+            if(Attachment->GetSpecReference().AttachmentPoint == GL_COLOR_ATTACHMENT0)
+            {
+                glActiveTexture(GL_TEXTURE0 + TextureUnit);
+                glBindTexture(GL_TEXTURE_2D, Attachment->GetBackingTexture()->GetTextureID());;
+                return;
+            }
+        }
+    }
+
 }

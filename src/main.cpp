@@ -106,10 +106,9 @@ const Rendering::FFramebufferSpec PerspectiveFramebufferSpec =
 {
     DefaultWidth,
     DefaultHeight,
-    {Rendering::DefaultRenderBufferFramebufferAttachment_Color}
+    {Rendering::DefaultTexturedFramebufferAttachment_Color,
+                Rendering::DefaultRenderBufferFramebufferAttachment_Depth}
 };
-
-
 
 constexpr int Viewport_Perspective = 0;
 constexpr int Viewport_Top = 1;
@@ -719,6 +718,8 @@ void Render(double dt)
     //mode all 4 render, each confined to its own screen quadrant
     const int ActiveViewportCount = bMultiViewMode ? ViewportCount : 1;
 
+    glEnable(GL_DEPTH_TEST);
+
     for(int i = 0; i < ActiveViewportCount; i++)
     {
         FViewport& VP = Viewports[i];
@@ -1135,7 +1136,7 @@ void CompositeFramebufferBackedViewports()
         const int RectH = bMultiViewMode ? VP.QuadrantHeight : Height;
 
         glViewport(RectX, RectY, RectW, RectH);
-        //VP.ViewportFramebuffer->GetColorTexture().Bind(0);
+        VP.ViewportFramebuffer->BindColorAttachment(0);
         BlitQuad->Draw(GL_TRIANGLES);
     }
 

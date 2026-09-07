@@ -63,6 +63,7 @@ namespace Rendering
 
         GLuint GetFramebufferID() const { return FramebufferID; }
 
+        void BindColorAttachment(unsigned int AttachmentPoint) const;
 
         int GetWidth() const { return Width; }
         int GetHeight() const { return Height; }
