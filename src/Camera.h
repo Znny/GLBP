@@ -36,6 +36,32 @@ public:
     const glm::mat4& GetProjectionMatrix() const;
     glm::mat4 GetViewProjectionMatrix();
 
+    // Directional movement, relative to the camera's current orientation.
+    void MoveForward(float Distance);
+    void MoveBackward(float Distance);
+    void MoveRight(float Distance);
+    void MoveLeft(float Distance);
+
+    // World-space vertical movement, independent of the camera's pitch/yaw.
+    void MoveUp(float Distance);
+    void MoveDown(float Distance);
+
+    // Forward/backward movement projected onto the world XZ (ground) plane, so height never
+    // changes regardless of the camera's current pitch - used by LMB glide.
+    void GlideForward(float Distance);
+    void GlideBackward(float Distance);
+
+    // Yaw around the world up axis.
+    void Yaw(float Degrees);
+
+    // Pitch around the camera's local right axis, clamped to +/-MaxPitchDegrees so it can't flip
+    // over. Tracks accumulated pitch internally so the clamp holds regardless of caller.
+    void Pitch(float Degrees);
+
+    // Screen-space pan: translate along the camera's own local Right/Up plane, no dolly. Shared by
+    // MB3 pan, ortho-viewport drag-pan, and ortho scroll-zoom's cursor-recentering.
+    void Pan(float RightAmount, float UpAmount);
+
 protected:
     void UpdateProjectionMatrix();
 
@@ -48,4 +74,6 @@ private:
     double FarClipDistance = 1000.0;
     glm::mat4 ProjectionMatrix = glm::mat4();
 
+    static constexpr float MaxPitchDegrees = 89.0f;
+    float AccumulatedPitchDegrees = 0.0f;
 };

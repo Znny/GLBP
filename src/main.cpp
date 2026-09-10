@@ -168,7 +168,6 @@ static bool bRightMouseHeld = false;
 static bool bFirstCursorSample = true;
 static double LastCursorX = 0.0;
 static double LastCursorY = 0.0;
-static float CameraPitchDeg = 0.0f;
 
 //index (into Viewports) of whichever viewport the current RMB drag is targeting, latched at press
 //time from the cursor's quadrant - Viewport_Perspective flies the camera as before, Top/Front/Right
@@ -533,8 +532,9 @@ bool InitGraphics()
     Viewports[Viewport_Perspective].ViewportFramebuffer = std::make_unique<Rendering::Framebuffer>(PerspectiveFramebufferSpec);
 
     //three stationary orthographic cameras, one looking down each major world axis at the scene
-    //origin - see Camera.cpp's ortho projection fix and the rotation math this relies on (Transform::
-    //WorldForward = +Z, identity rotation looks down -Z, confirmed against MainCamera's own setup above)
+    //origin - identity rotation always renders looking down -Z (that's fixed by the view/projection
+    //convention in Camera.cpp, independent of Transform::WorldForward, which just defines what
+    //GetForwardVector() points along - see Transform.cpp), confirmed against MainCamera's own setup below
     constexpr double OrthoDistance = 8.0;
 
     Viewports[Viewport_Top].ViewportCamera = Camera(OrthoClipSize, OrthoClipSize, 0.1, 1000.0, ECameraProjectionMode::Orthographic);
@@ -1148,14 +1148,8 @@ void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
         constexpr float GlideYawSensitivity = 0.15f;
         constexpr float GlideMoveSensitivity = 0.03f; //world units per pixel of vertical mouse movement
 
-        MainCamera.RotateLocal(Transform::WorldUp, (float)-DeltaX * GlideYawSensitivity);
-
-        glm::vec3 GroundForward = MainCamera.GetForwardVector();
-        GroundForward.y = 0.0f;
-        if(glm::length(GroundForward) > 0.0001f)
-        {
-            MainCamera.AddTranslation(glm::normalize(GroundForward) * (float)DeltaY * GlideMoveSensitivity);
-        }
+        MainCamera.Yaw((float)-DeltaX * GlideYawSensitivity);
+        MainCamera.GlideBackward((float)DeltaY * GlideMoveSensitivity);
         return;
     }
 
@@ -1165,9 +1159,7 @@ void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
         //dolly - both axes inverted relative to the ortho RMB-pan's "content follows cursor"
         //convention above, per feel testing.
         constexpr float YZPanSensitivity = 0.03f;
-        MainCamera.AddTranslation(
-            MainCamera.GetRightVector() * (float)DeltaX * YZPanSensitivity +
-            MainCamera.GetUpVector()    * (float)-DeltaY * YZPanSensitivity);
+        MainCamera.Pan((float)DeltaX * YZPanSensitivity, (float)-DeltaY * YZPanSensitivity);
         return;
     }
 
@@ -1181,24 +1173,16 @@ void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
         //width is aspect-corrected to match.
         FViewport& VP = Viewports[ActiveMouseViewport];
         const float PanScale = (float)(OrthoClipSize / (double)VP.QuadrantHeight);
-        VP.ViewportCamera.AddTranslation(
-            VP.ViewportCamera.GetRightVector() * (float)-DeltaX * PanScale +
-            VP.ViewportCamera.GetUpVector()    * (float)DeltaY * PanScale);
+        VP.ViewportCamera.Pan((float)-DeltaX * PanScale, (float)DeltaY * PanScale);
         return;
     }
 
     constexpr float MouseSensitivity = 0.15f;
-    constexpr float MaxPitchDeg = 89.0f;
 
-    //yaw rotates around the world up axis, independent of the camera's current tilt
-    //MainCamera.RotateWorld(Transform::WorldUp, (float)-DeltaX * MouseSensitivity);
-    MainCamera.RotateLocal(Transform::WorldUp, (float)-DeltaX * MouseSensitivity);
-
-    //pitch rotates around the camera's own local right axis, clamped so it can't flip over
-    float PitchDelta = (float)-DeltaY * MouseSensitivity;
-    PitchDelta = glm::clamp(CameraPitchDeg + PitchDelta, -MaxPitchDeg, MaxPitchDeg) - CameraPitchDeg;
-    CameraPitchDeg += PitchDelta;
-    MainCamera.RotateLocal(MainCamera.GetRightVector(), PitchDelta);
+    //yaw rotates around the world up axis, independent of the camera's current tilt; pitch rotates
+    //around the camera's own local right axis - Camera::Pitch clamps so it can't flip over
+    MainCamera.Yaw((float)-DeltaX * MouseSensitivity);
+    MainCamera.Pitch((float)-DeltaY * MouseSensitivity);
 }
 
 //mouse-wheel zoom for whichever orthographic viewport (Top/Front/Right) the cursor is currently
@@ -1254,12 +1238,11 @@ void ScrollEventCallback(GLFWwindow* Window, double XOffset, double YOffset)
     const double AspectRatio = (double)VP.QuadrantWidth / (double)VP.QuadrantHeight;
     VP.ViewportCamera.SetClipDimensions(NewWorldHeight * AspectRatio, NewWorldHeight, 0.1, 1000.0);
 
-    //screen-right/screen-up in world space (Y flipped since screen-down is world "down" on screen,
-    //i.e. -Up), scaled by how much the world-units-per-pixel changed, shifts the camera so the same
-    //pixel still maps to the same world point post-zoom
-    const glm::vec3 WorldOffsetDir = VP.ViewportCamera.GetRightVector() * (float)OffsetX
-                                    - VP.ViewportCamera.GetUpVector() * (float)OffsetYScreen;
-    VP.ViewportCamera.AddTranslation(WorldOffsetDir * (float)(OldWorldUnitsPerPixel - NewWorldUnitsPerPixel));
+    //pan by screen-right/screen-up (Y flipped since screen-down is world "down" on screen, i.e.
+    //-Up), scaled by how much the world-units-per-pixel changed, so the same pixel still maps to
+    //the same world point post-zoom
+    const float PanScale = (float)(OldWorldUnitsPerPixel - NewWorldUnitsPerPixel);
+    VP.ViewportCamera.Pan((float)OffsetX * PanScale, (float)-OffsetYScreen * PanScale);
 }
 
 void UpdateCameraMovement(GLFWwindow* Window, double DeltaTime)
@@ -1271,22 +1254,26 @@ void UpdateCameraMovement(GLFWwindow* Window, double DeltaTime)
         return;
     }
 
-    constexpr float MoveSpeed = 6.0f;
-    glm::vec3 MoveDirection(0.0f);
+    //resolve which of WASDQE are held into a single local-space intent vector (+X = right, +Y = up,
+    //+Z = forward) so simultaneous keys (e.g. strafing while moving forward) don't move the camera
+    //faster than a single key would - the actual movement math lives on Camera itself
+    //(MoveForward/Right/Up etc.), this just decides how much of each to ask for.
+    glm::vec3 MoveIntent(0.0f);
+    if(glfwGetKey(Window, GLFW_KEY_W) == GLFW_PRESS) MoveIntent.z += 1.0f;
+    if(glfwGetKey(Window, GLFW_KEY_S) == GLFW_PRESS) MoveIntent.z -= 1.0f;
+    if(glfwGetKey(Window, GLFW_KEY_D) == GLFW_PRESS) MoveIntent.x += 1.0f;
+    if(glfwGetKey(Window, GLFW_KEY_A) == GLFW_PRESS) MoveIntent.x -= 1.0f;
+    if(glfwGetKey(Window, GLFW_KEY_E) == GLFW_PRESS) MoveIntent.y += 1.0f;
+    if(glfwGetKey(Window, GLFW_KEY_Q) == GLFW_PRESS) MoveIntent.y -= 1.0f;
 
-    //forward/right movement is local to the camera's current orientation
-    if(glfwGetKey(Window, GLFW_KEY_W) == GLFW_PRESS) MoveDirection -= MainCamera.GetForwardVector();
-    if(glfwGetKey(Window, GLFW_KEY_S) == GLFW_PRESS) MoveDirection += MainCamera.GetForwardVector();
-    if(glfwGetKey(Window, GLFW_KEY_D) == GLFW_PRESS) MoveDirection += MainCamera.GetRightVector();
-    if(glfwGetKey(Window, GLFW_KEY_A) == GLFW_PRESS) MoveDirection -= MainCamera.GetRightVector();
-
-    //up/down movement stays in world space regardless of camera pitch
-    if(glfwGetKey(Window, GLFW_KEY_E) == GLFW_PRESS) MoveDirection += Transform::WorldUp;
-    if(glfwGetKey(Window, GLFW_KEY_Q) == GLFW_PRESS) MoveDirection -= Transform::WorldUp;
-
-    if(glm::length(MoveDirection) > 0.0001f)
+    if(glm::length(MoveIntent) > 0.0001f)
     {
-        MainCamera.AddTranslation(glm::normalize(MoveDirection) * MoveSpeed * (float)DeltaTime);
+        constexpr float MoveSpeed = 6.0f;
+        MoveIntent = glm::normalize(MoveIntent) * MoveSpeed * (float)DeltaTime;
+
+        if(MoveIntent.z > 0.0f) MainCamera.MoveForward(MoveIntent.z); else MainCamera.MoveBackward(-MoveIntent.z);
+        if(MoveIntent.x > 0.0f) MainCamera.MoveRight(MoveIntent.x);   else MainCamera.MoveLeft(-MoveIntent.x);
+        if(MoveIntent.y > 0.0f) MainCamera.MoveUp(MoveIntent.y);      else MainCamera.MoveDown(-MoveIntent.y);
     }
 }
 

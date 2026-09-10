@@ -4,7 +4,7 @@
 
 #include "Transform.h"
 
-const glm::vec3 Transform::WorldForward{0.0f, 0.0f, 1.0f};
+const glm::vec3 Transform::WorldForward{0.0f, 0.0f, -1.0f};
 const glm::vec3 Transform::WorldRight{1.0f, 0.0f, 0.0f};
 const glm::vec3 Transform::WorldUp{0.0f, 1.0f, 0.0f};
 
