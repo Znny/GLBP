@@ -1271,9 +1271,10 @@ void UpdateCameraMovement(GLFWwindow* Window, double DeltaTime)
         constexpr float MoveSpeed = 6.0f;
         MoveIntent = glm::normalize(MoveIntent) * MoveSpeed * (float)DeltaTime;
 
-        if(MoveIntent.z > 0.0f) MainCamera.MoveForward(MoveIntent.z); else MainCamera.MoveBackward(-MoveIntent.z);
-        if(MoveIntent.x > 0.0f) MainCamera.MoveRight(MoveIntent.x);   else MainCamera.MoveLeft(-MoveIntent.x);
-        if(MoveIntent.y > 0.0f) MainCamera.MoveUp(MoveIntent.y);      else MainCamera.MoveDown(-MoveIntent.y);
+        //MoveBackward/Left/Down are just negative MoveForward/Right/Up, so a signed distance covers both
+        MainCamera.MoveForward(MoveIntent.z);
+        MainCamera.MoveRight(MoveIntent.x);
+        MainCamera.MoveUp(MoveIntent.y);
     }
 }
 
