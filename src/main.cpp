@@ -31,6 +31,7 @@
 #include "VertexBuffer.h"
 #include "IndexBuffer.h"
 #include "VertexArray.h"
+#include "MeshData.h"
 #include "Texture2D.h"
 #include "Framebuffer.h"
 #include "UniformBuffer.h"
@@ -66,14 +67,17 @@ void UpdateCameraMovement(GLFWwindow* Window, double DeltaTime);
 void KeyboardEventCallback(GLFWwindow* Window, int KeyCode, int ScanCode, int Action, int Modifiers);
 void MouseButtonEventCallback(GLFWwindow* Window, int Button, int Action, int Modifiers);
 void CursorPositionEventCallback(GLFWwindow* Window, double XPos, double YPos);
+void ScrollEventCallback(GLFWwindow* Window, double XOffset, double YOffset);
+int GetViewportIndexAtCursor(double CursorX, double CursorY);
 void WindowResizeEventCallback(GLFWwindow* Window, int NewWidth, int NewHeight);
 
 void ErrorCallback(int error, const char* description);
 
 void Cleanup();
 
-std::unique_ptr<Rendering::VertexArray> CreateHexTorusVertexArray(float InnerRadius, float OuterRadius, int SideCount, float HalfDepth);
-std::unique_ptr<Rendering::VertexArray> CreateTexturedCubeVertexArray(float HalfSize, float OffsetX);
+Rendering::FMeshData GenerateTetrahedronMeshData();
+Rendering::FMeshData GenerateHexTorusMeshData(float InnerRadius, float OuterRadius, int SideCount, float HalfDepth);
+Rendering::FMeshData GenerateTexturedCubeMeshData(float HalfSize, float OffsetX);
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //main window for the sim
@@ -114,6 +118,12 @@ struct FViewport
     // Front/Right override this at setup below to match the plane they actually look across.
     glm::vec3 GridTangent = glm::vec3(1.0f, 0.0f, 0.0f);
     glm::vec3 GridBitangent = glm::vec3(0.0f, 0.0f, 1.0f);
+
+    // World-space frustum height for this viewport's orthographic camera - starts at OrthoClipSize
+    // (matching every ortho viewport's initial zoom) and is adjusted per-viewport by mouse-wheel
+    // zoom (see ScrollEventCallback). Unused by the Perspective viewport, which sizes its frustum
+    // from the window's pixel dimensions instead (see RecomputeViewportQuadrants).
+    double OrthoWorldHeight = OrthoClipSize;
 };
 
 //Rendering::FramebufferAttachmentSpec
@@ -160,6 +170,12 @@ static double LastCursorX = 0.0;
 static double LastCursorY = 0.0;
 static float CameraPitchDeg = 0.0f;
 
+//index (into Viewports) of whichever viewport the current RMB drag is targeting, latched at press
+//time from the cursor's quadrant - Viewport_Perspective flies the camera as before, Top/Front/Right
+//pan instead (see CursorPositionEventCallback), -1 means no drag is active (or it started in the
+//border gap between quadrants, which is a no-op)
+static int ActiveMouseViewport = -1;
+
 //timing
 static double LastFrameTime = 0;
 static double ThisFrameTime = 0;
@@ -180,56 +196,12 @@ static bool bGLFWInitialized = false;
 static int NegotiatedGLVersionMajor = 0;
 static int NegotiatedGLVersionMinor = 0;
 
-//vertices of a colored tetrahedron centered at the origin, one triangle (3 verts) per face rather
-//than 4 shared corner verts, so each face can carry its own copy of the 3 corner colors below -
-//non-indexed glDrawArrays draw, same raw-GL style as the original triangle this replaces (deliberately
-//not migrated to the VertexBuffer/IndexBuffer/VertexArray classes - see the hex torus/textured cube
-//below for that style). Apex-up construction: V0 sits directly above the centroid on +Y, the other
-//3 vertices form an equilateral triangle in a horizontal plane below it, spaced 120 degrees apart
-//around the Y axis, with V1 positioned in the +Z direction from center. For a regular tetrahedron
-//with circumradius R (center-to-vertex distance) = 3.0: apex at (0,R,0); base plane at y=-R/3 (so
-//the 4 vertices' centroid lands exactly on the origin); base horizontal radius = R*2*sqrt(2)/3 (the
-//value that makes apex-to-base and base-to-base edge lengths equal, i.e. makes it regular).
-//Face winding is CCW as seen from outside each face (verified by hand against the tetrahedron's
-//centroid at the origin), matching the codebase's winding convention elsewhere even though face
-//culling isn't currently enabled.
-static float TetrahedronVerts[] =
-{
-    //face opposite V0=(0, 3, 0): V1,V3,V2
-     0.000000f, -1.0f,  2.828427f,
-    -2.449490f, -1.0f, -1.414214f,
-     2.449490f, -1.0f, -1.414214f,
-    //face opposite V1=(0, -1, 2.828427): V0,V2,V3
-     0.0f,  3.0f,  0.0f,
-     2.449490f, -1.0f, -1.414214f,
-    -2.449490f, -1.0f, -1.414214f,
-    //face opposite V2=(2.449490, -1, -1.414214): V0,V3,V1
-     0.0f,  3.0f,  0.0f,
-    -2.449490f, -1.0f, -1.414214f,
-     0.000000f, -1.0f,  2.828427f,
-    //face opposite V3=(-2.449490, -1, -1.414214): V0,V1,V2
-     0.0f,  3.0f,  0.0f,
-     0.000000f, -1.0f,  2.828427f,
-     2.449490f, -1.0f, -1.414214f,
-};
-
-//per-corner colors (V0=red, V1=green, V2=blue, V3=yellow), repeated per-face in the same order as
-//TetrahedronVerts above so each corner keeps the same color everywhere it appears - Gouraud-blends
-//within each face, same visual language as the original triangle's red/green/blue gradient.
-static float TetrahedronColors[] =
-{
-    0.0f, 1.0f, 0.0f,  1.0f, 1.0f, 0.0f,  0.0f, 0.0f, 1.0f, //V1,V3,V2
-    1.0f, 0.0f, 0.0f,  0.0f, 0.0f, 1.0f,  1.0f, 1.0f, 0.0f, //V0,V2,V3
-    1.0f, 0.0f, 0.0f,  1.0f, 1.0f, 0.0f,  0.0f, 1.0f, 0.0f, //V0,V3,V1
-    1.0f, 0.0f, 0.0f,  0.0f, 1.0f, 0.0f,  0.0f, 0.0f, 1.0f, //V0,V1,V2
-};
-
-//vertex buffer object
-GLuint VertexBufferObject_Positions;
-GLuint VertexBufferObject_Colors;
-
-//vertex array object
-GLuint TetrahedronVAO;
+//colored tetrahedron centered at the origin - see GenerateTetrahedronMeshData() for the geometry
+//itself (plain CPU-side FMeshData) and UploadMesh() (MeshData.h) for the GPU upload step that
+//builds this. unique_ptr for the same deferred-construction reason as HexTorus/TexturedCube below
+//(VertexArray's constructor needs a live GL context, so this can't be built at global-init time,
+//only once InitGraphics() has created the window/context).
+std::unique_ptr<Rendering::VertexArray> Tetrahedron;
 
 //hexagonal torus ("hex nut") drawn around the tetrahedron above - a hexagonal ring extruded along Z
 //into a solid loop (front/back faces plus inner/outer walls), built with the new VertexBuffer/
@@ -321,15 +293,55 @@ bool Init(int argc, char** argv, char** envp)
     return true;
 }
 
-//builds the hexagonal torus ("hex nut") geometry - a hexagonal ring extruded along Z into a solid
-//loop (front/back faces plus inner/outer walls) - and returns it as a ready-to-draw VertexArray.
-//4 verts per side (outer/inner rim, front/back face), indexed - not a single continuous triangle
-//strip like the old flat version, since front/back/inner-wall/outer-wall can't be expressed as one
-//strip without degenerate triangles; GL_TRIANGLES is simpler and clearer here.
-std::unique_ptr<Rendering::VertexArray> CreateHexTorusVertexArray(float InnerRadius, float OuterRadius, int SideCount, float HalfDepth)
+//builds a colored tetrahedron's geometry, centered at the origin, as plain CPU-side FMeshData - see
+//UploadMesh() (MeshData.h) for the step that turns this into a GPU-ready VertexArray. One triangle
+//(3 verts) per face rather than 4 shared corner verts, so each face can carry its own copy of the 3
+//corner colors. Apex-up construction: V0 sits directly above the centroid on +Y, the other 3
+//vertices form an equilateral triangle in a horizontal plane below it, spaced 120 degrees apart
+//around the Y axis, with V1 positioned in the +Z direction from center. For a regular tetrahedron
+//with circumradius R (center-to-vertex distance) = 3.0: apex at (0,R,0); base plane at y=-R/3 (so
+//the 4 vertices' centroid lands exactly on the origin); base horizontal radius = R*2*sqrt(2)/3 (the
+//value that makes apex-to-base and base-to-base edge lengths equal, i.e. makes it regular).
+//Face winding is CCW as seen from outside each face (verified by hand against the tetrahedron's
+//centroid at the origin), matching the codebase's winding convention elsewhere even though face
+//culling isn't currently enabled.
+Rendering::FMeshData GenerateTetrahedronMeshData()
 {
-    std::vector<float> HexVerts; //interleaved {x,y,z, r,g,b}
-    std::vector<GLuint> HexIndices;
+    Rendering::FMeshData MeshData;
+    MeshData.Positions =
+    {
+        //face opposite V0=(0, 3, 0): V1,V3,V2
+        { 0.000000f, -1.0f,  2.828427f}, {-2.449490f, -1.0f, -1.414214f}, { 2.449490f, -1.0f, -1.414214f},
+        //face opposite V1=(0, -1, 2.828427): V0,V2,V3
+        { 0.0f,  3.0f,  0.0f}, { 2.449490f, -1.0f, -1.414214f}, {-2.449490f, -1.0f, -1.414214f},
+        //face opposite V2=(2.449490, -1, -1.414214): V0,V3,V1
+        { 0.0f,  3.0f,  0.0f}, {-2.449490f, -1.0f, -1.414214f}, { 0.000000f, -1.0f,  2.828427f},
+        //face opposite V3=(-2.449490, -1, -1.414214): V0,V1,V2
+        { 0.0f,  3.0f,  0.0f}, { 0.000000f, -1.0f,  2.828427f}, { 2.449490f, -1.0f, -1.414214f},
+    };
+
+    //per-corner colors (V0=red, V1=green, V2=blue, V3=yellow), repeated per-face in the same order
+    //as Positions above so each corner keeps the same color everywhere it appears - Gouraud-blends
+    //within each face, same visual language as the original triangle's red/green/blue gradient.
+    MeshData.Colors =
+    {
+        {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, //V1,V3,V2
+        {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 0.0f}, //V0,V2,V3
+        {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, //V0,V3,V1
+        {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, //V0,V1,V2
+    };
+
+    return MeshData;
+}
+
+//builds the hexagonal torus's ("hex nut") geometry - a hexagonal ring extruded along Z into a solid
+//loop (front/back faces plus inner/outer walls) - as plain CPU-side FMeshData. 4 verts per side
+//(outer/inner rim, front/back face), indexed - not a single continuous triangle strip like the old
+//flat version, since front/back/inner-wall/outer-wall can't be expressed as one strip without
+//degenerate triangles; GL_TRIANGLES is simpler and clearer here.
+Rendering::FMeshData GenerateHexTorusMeshData(float InnerRadius, float OuterRadius, int SideCount, float HalfDepth)
+{
+    Rendering::FMeshData MeshData;
 
     for(int Side = 0; Side < SideCount; Side++)
     {
@@ -338,10 +350,14 @@ std::unique_ptr<Rendering::VertexArray> CreateHexTorusVertexArray(float InnerRad
         const float SinA = sinf(Angle);
 
         //vertex order per side: 0=OuterFront, 1=InnerFront, 2=OuterBack, 3=InnerBack
-        HexVerts.insert(HexVerts.end(), {OuterRadius * CosA, OuterRadius * SinA,  HalfDepth, 1.0f, 0.6f, 0.0f});
-        HexVerts.insert(HexVerts.end(), {InnerRadius * CosA, InnerRadius * SinA,  HalfDepth, 1.0f, 0.6f, 0.0f});
-        HexVerts.insert(HexVerts.end(), {OuterRadius * CosA, OuterRadius * SinA, -HalfDepth, 1.0f, 0.6f, 0.0f});
-        HexVerts.insert(HexVerts.end(), {InnerRadius * CosA, InnerRadius * SinA, -HalfDepth, 1.0f, 0.6f, 0.0f});
+        MeshData.Positions.push_back({OuterRadius * CosA, OuterRadius * SinA,  HalfDepth});
+        MeshData.Positions.push_back({InnerRadius * CosA, InnerRadius * SinA,  HalfDepth});
+        MeshData.Positions.push_back({OuterRadius * CosA, OuterRadius * SinA, -HalfDepth});
+        MeshData.Positions.push_back({InnerRadius * CosA, InnerRadius * SinA, -HalfDepth});
+        for(int i = 0; i < 4; i++)
+        {
+            MeshData.Colors.push_back({1.0f, 0.6f, 0.0f});
+        }
     }
 
     //winding verified by hand (CCW as seen from each face's outward direction) for all 4 parts
@@ -354,34 +370,24 @@ std::unique_ptr<Rendering::VertexArray> CreateHexTorusVertexArray(float InnerRad
         const GLuint NextOuterBack  = (GLuint)(Next * 4 + 2), NextInnerBack  = (GLuint)(Next * 4 + 3);
 
         //front face (+Z outward): OuterFront, NextOuterFront, NextInnerFront, InnerFront
-        HexIndices.insert(HexIndices.end(), {OuterFront, NextOuterFront, NextInnerFront, NextInnerFront, InnerFront, OuterFront});
+        MeshData.Indices.insert(MeshData.Indices.end(), {OuterFront, NextOuterFront, NextInnerFront, NextInnerFront, InnerFront, OuterFront});
         //back face (-Z outward, reversed relative to front): InnerBack, NextInnerBack, NextOuterBack, ...
-        HexIndices.insert(HexIndices.end(), {InnerBack, NextInnerBack, NextOuterBack, NextOuterBack, OuterBack, InnerBack});
+        MeshData.Indices.insert(MeshData.Indices.end(), {InnerBack, NextInnerBack, NextOuterBack, NextOuterBack, OuterBack, InnerBack});
         //outer wall (radially outward): OuterFront, OuterBack, NextOuterBack, ...
-        HexIndices.insert(HexIndices.end(), {OuterFront, OuterBack, NextOuterBack, NextOuterBack, NextOuterFront, OuterFront});
+        MeshData.Indices.insert(MeshData.Indices.end(), {OuterFront, OuterBack, NextOuterBack, NextOuterBack, NextOuterFront, OuterFront});
         //inner wall (radially inward, into the hole): InnerFront, NextInnerFront, NextInnerBack, ...
-        HexIndices.insert(HexIndices.end(), {InnerFront, NextInnerFront, NextInnerBack, NextInnerBack, InnerBack, InnerFront});
+        MeshData.Indices.insert(MeshData.Indices.end(), {InnerFront, NextInnerFront, NextInnerBack, NextInnerBack, InnerBack, InnerFront});
     }
 
-    auto Result = std::make_unique<Rendering::VertexArray>();
-    Result->AddVertexBuffer(
-        Rendering::VertexBuffer(HexVerts.data(), HexVerts.size() * sizeof(float), GL_STATIC_DRAW),
-        {
-            Rendering::FVertexAttribute{0, 3, GL_FLOAT, false},
-            Rendering::FVertexAttribute{1, 3, GL_FLOAT, false}
-        },
-        6 * sizeof(float));
-    Result->SetIndexBuffer(Rendering::IndexBuffer(HexIndices.data(), (unsigned int)HexIndices.size(), GL_STATIC_DRAW));
-    return Result;
+    return MeshData;
 }
 
-//builds a cube's geometry (positions + UVs) and returns it as a ready-to-draw VertexArray, for the
-//textured cube demonstrating Texture2D. 6 faces x 4 corners, each face's own 4 verts (not shared
-//cube corners) so each face gets its own full 0..1 UV range - sharing corners across faces would
-//need ambiguous per-vertex UVs, since a cube corner is part of 3 differently-UV'd faces. Corner
-//order per face is CCW as seen from outside (verified by hand via cross product against each face's
-//own normal).
-std::unique_ptr<Rendering::VertexArray> CreateTexturedCubeVertexArray(float HalfSize, float OffsetX)
+//builds a cube's geometry (positions + UVs) as plain CPU-side FMeshData, for the textured cube
+//demonstrating Texture2D. 6 faces x 4 corners, each face's own 4 verts (not shared cube corners) so
+//each face gets its own full 0..1 UV range - sharing corners across faces would need ambiguous
+//per-vertex UVs, since a cube corner is part of 3 differently-UV'd faces. Corner order per face is
+//CCW as seen from outside (verified by hand via cross product against each face's own normal).
+Rendering::FMeshData GenerateTexturedCubeMeshData(float HalfSize, float OffsetX)
 {
     struct FCubeFace { glm::vec3 Corners[4]; };
     const FCubeFace CubeFaces[6] =
@@ -395,34 +401,20 @@ std::unique_ptr<Rendering::VertexArray> CreateTexturedCubeVertexArray(float Half
     };
     const glm::vec2 FaceUVs[4] = { {0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f} };
 
-    //interleaved {x,y,z, u,v} per vertex
-    std::vector<float> CubeVerts;
-    std::vector<GLuint> CubeIndices;
+    Rendering::FMeshData MeshData;
     for(int Face = 0; Face < 6; Face++)
     {
         for(int Corner = 0; Corner < 4; Corner++)
         {
             const glm::vec3& C = CubeFaces[Face].Corners[Corner];
-            CubeVerts.insert(CubeVerts.end(),
-            {
-                OffsetX + C.x * HalfSize, C.y * HalfSize, C.z * HalfSize,
-                FaceUVs[Corner].x, FaceUVs[Corner].y
-            });
+            MeshData.Positions.push_back({OffsetX + C.x * HalfSize, C.y * HalfSize, C.z * HalfSize});
+            MeshData.UVs.push_back(FaceUVs[Corner]);
         }
         const GLuint Base = (GLuint)(Face * 4);
-        CubeIndices.insert(CubeIndices.end(), {Base, Base + 1, Base + 2, Base + 2, Base + 3, Base});
+        MeshData.Indices.insert(MeshData.Indices.end(), {Base, Base + 1, Base + 2, Base + 2, Base + 3, Base});
     }
 
-    auto Result = std::make_unique<Rendering::VertexArray>();
-    Result->AddVertexBuffer(
-        Rendering::VertexBuffer(CubeVerts.data(), CubeVerts.size() * sizeof(float), GL_STATIC_DRAW),
-        {
-            Rendering::FVertexAttribute{0, 3, GL_FLOAT, false},
-            Rendering::FVertexAttribute{1, 2, GL_FLOAT, false}
-        },
-        5 * sizeof(float));
-    Result->SetIndexBuffer(Rendering::IndexBuffer(CubeIndices.data(), (unsigned int)CubeIndices.size(), GL_STATIC_DRAW));
-    return Result;
+    return MeshData;
 }
 
 bool InitGraphics()
@@ -473,43 +465,21 @@ bool InitGraphics()
     ///////////////////////
     /// initialize rendering objects
 
-    //create vertex buffer for storing per-vertex data
-    glGenBuffers(1, &VertexBufferObject_Positions);
-    glBindBuffer(GL_ARRAY_BUFFER, VertexBufferObject_Positions);
-    glBufferData(GL_ARRAY_BUFFER, 36 * sizeof(float), TetrahedronVerts, GL_STATIC_DRAW);
+    Tetrahedron = Rendering::UploadMesh(GenerateTetrahedronMeshData());
 
-    glGenBuffers(1, &VertexBufferObject_Colors);
-    glBindBuffer(GL_ARRAY_BUFFER, VertexBufferObject_Colors);
-    glBufferData(GL_ARRAY_BUFFER, 36 * sizeof(float), TetrahedronColors, GL_STATIC_DRAW);
-
-    //create vertax array object for storing info about bound objects and what to render
-    glGenVertexArrays(1, &TetrahedronVAO);
-    glBindVertexArray(TetrahedronVAO);
-
-    //specify vertex attribute 0 and specify format
-    glBindBuffer(GL_ARRAY_BUFFER, VertexBufferObject_Positions);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, NULL);
-
-    //specify color layout
-    glBindBuffer(GL_ARRAY_BUFFER, VertexBufferObject_Colors);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, NULL);
-
-    glEnableVertexAttribArray(0);
-    glEnableVertexAttribArray(1);
-
-    //hexagonal torus surrounding the tetrahedron above, built with VertexBuffer/IndexBuffer/VertexArray
-    //instead of raw GL calls - proves out the new abstraction alongside the old hand-rolled style right next to it.
-    //Extruded along Z into a solid hex-nut-shaped torus (front/back faces + inner/outer walls) rather
-    //than the flat hexagonal washer this used to be - the passthrough shader does no lighting/normal
-    //shading at all (flat vertex-color Gouraud interpolation only), so no per-face vertex duplication
-    //is needed purely for shading correctness; only geometric position differs between faces/walls.
+    //hexagonal torus surrounding the tetrahedron above, built with VertexBuffer/IndexBuffer/VertexArray,
+    //same as the tetrahedron. Extruded along Z into a solid hex-nut-shaped torus (front/back faces +
+    //inner/outer walls) rather than the flat hexagonal washer this used to be - the passthrough
+    //shader does no lighting/normal shading at all (flat vertex-color Gouraud interpolation only),
+    //so no per-face vertex duplication is needed purely for shading correctness; only geometric
+    //position differs between faces/walls.
     {
         constexpr float InnerRadius = 4.0f;
         constexpr float OuterRadius = 5.0f;
         constexpr int SideCount = 6;
         constexpr float HalfDepth = 0.5f; //full depth 1.0, matching the ring's radial width (Outer-Inner)
 
-        HexTorus = CreateHexTorusVertexArray(InnerRadius, OuterRadius, SideCount, HalfDepth);
+        HexTorus = Rendering::UploadMesh(GenerateHexTorusMeshData(InnerRadius, OuterRadius, SideCount, HalfDepth));
     }
 
     //textured cube off to the side of the tetrahedron/hex-torus, proving out Texture2D - same
@@ -541,7 +511,7 @@ bool InitGraphics()
         constexpr float CubeHalfSize = 0.6f;
         constexpr float CubeOffsetX = 5.7f;
 
-        TexturedCube = CreateTexturedCubeVertexArray(CubeHalfSize, CubeOffsetX);
+        TexturedCube = Rendering::UploadMesh(GenerateTexturedCubeMeshData(CubeHalfSize, CubeOffsetX));
     }
 
     //setup the camera: perspective projection matching the window, positioned back from the origin and looking at it
@@ -689,6 +659,7 @@ bool InitInput()
     //set mouse callbacks, used to fly the camera while the right mouse button is held
     glfwSetMouseButtonCallback(MainWindow, MouseButtonEventCallback);
     glfwSetCursorPosCallback(MainWindow, CursorPositionEventCallback);
+    glfwSetScrollCallback(MainWindow, ScrollEventCallback);
 
     //set resize callback
     glfwSetFramebufferSizeCallback(MainWindow, WindowResizeEventCallback);
@@ -811,11 +782,13 @@ void Render(double dt)
 
         //render here
         glUseProgram(PassthroughShaderProgram->GetProgramID());
-        glBindVertexArray(TetrahedronVAO);
-        glDrawArrays(GL_TRIANGLES, 0, 12);
+        if(Tetrahedron)
+        {
+            Tetrahedron->Draw(GL_TRIANGLES);
+        }
 
         //draw the hex torus around the tetrahedron - same shader/uniforms, geometry built via the
-        //new VertexBuffer/IndexBuffer/VertexArray classes instead of raw GL calls like the tetrahedron above
+        //same VertexBuffer/IndexBuffer/VertexArray classes as the tetrahedron above
         if(HexTorus)
         {
             HexTorus->Draw(GL_TRIANGLES);
@@ -855,6 +828,34 @@ void Render(double dt)
     glViewport(0, 0, Width, Height); //restore full-window viewport before compositing/HUD/ImGui
     CompositeFramebufferBackedViewports(); //perspective viewport has a Framebuffer now, but the blit is still a stub - see FViewport's comment
     DrawViewportBorders();
+
+    //label each active viewport (e.g. "Top (+Y)") so it's clear which is which in multi-view mode -
+    //axis matches that viewport's camera position set up in InitGraphics() (Top sits at +Y looking
+    //down, Front at +Z, Right at +X)
+    for(int i = 0; i < ActiveViewportCount; i++)
+    {
+        const FViewport& VP = Viewports[i];
+
+        const char* Label = "Perspective";
+        if(i == Viewport_Top)    Label = "Top (+Y)";
+        else if(i == Viewport_Front)  Label = "Front (+Z)";
+        else if(i == Viewport_Right)  Label = "Right (+X)";
+
+        const int RectX = bMultiViewMode ? VP.QuadrantX : 0;
+        const int RectY = bMultiViewMode ? VP.QuadrantY : 0;
+        const int RectW = bMultiViewMode ? VP.QuadrantWidth : Width;
+        const int RectH = bMultiViewMode ? VP.QuadrantHeight : Height;
+
+        //top-center Label within its viewport's rect. TextRenderer is top-left-origin/Y-down and
+        //(X, Y) is the baseline-left origin; Quadrant rects are bottom-left-origin, so the
+        //quadrant's top edge converts as Height - (RectY + RectH). FontPixelHeight offsets down
+        //from that edge to the text's baseline, matching the HUD text's 12/28 top margin below.
+        constexpr float FontPixelHeight = 24.0f; //matches TextRenderer.Initialize() in InitGraphics()
+        const float TextWidth = TextRenderer.MeasureTextWidth(Label);
+        const float LabelX = (float)RectX + ((float)RectW - TextWidth) * 0.5f;
+        const float LabelY = (float)(Height - (RectY + RectH)) + FontPixelHeight;
+        TextRenderer.DrawText(Label, LabelX, LabelY, glm::vec3(1.0f, 1.0f, 1.0f));
+    }
 
     //draw a small screen-space HUD showing the active gizmo mode and hotkeys
     const char* ModeName = "Translate (W)";
@@ -983,9 +984,34 @@ void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Ac
     }
 }
 
+//which viewport (if any) a screen-space cursor position falls within - Perspective always claims
+//the whole window in single-view mode since it's the only thing rendering; in multi-view mode each
+//of the 4 quadrants is hit-tested via its Quadrant* rect, returning -1 for the border gap between
+//them. CursorX/Y are in GLFW's convention (top-left origin, Y down); Quadrant* is bottom-left
+//origin (matches glViewport/glScissor), so Y is flipped before comparing.
+int GetViewportIndexAtCursor(double CursorX, double CursorY)
+{
+    if(!bMultiViewMode)
+    {
+        return Viewport_Perspective;
+    }
+
+    const double FlippedY = (double)Height - CursorY;
+    for(int i = 0; i < ViewportCount; i++)
+    {
+        const FViewport& VP = Viewports[i];
+        if(CursorX >= VP.QuadrantX && CursorX < VP.QuadrantX + VP.QuadrantWidth &&
+           FlippedY >= VP.QuadrantY && FlippedY < VP.QuadrantY + VP.QuadrantHeight)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
 void MouseButtonEventCallback(GLFWwindow *Window, int Button, int Action, int Modifiers)
 {
-    //don't start camera-fly from a click ImGui already claimed (e.g. on a panel/widget)
+    //don't start camera-fly/pan from a click ImGui already claimed (e.g. on a panel/widget)
     if(ImGui::GetIO().WantCaptureMouse)
     {
         return;
@@ -1000,9 +1026,16 @@ void MouseButtonEventCallback(GLFWwindow *Window, int Button, int Action, int Mo
 
     if(bRightMouseHeld)
     {
-        if(!bUsingWSL)
+        double CursorX, CursorY;
+        glfwGetCursorPos(Window, &CursorX, &CursorY);
+        //latched for the duration of the drag - which viewport this targets doesn't change even if
+        //the cursor wanders into another quadrant while still held
+        ActiveMouseViewport = GetViewportIndexAtCursor(CursorX, CursorY);
+
+        //only the perspective fly-cam needs the FPS-style hidden/locked cursor; ortho panning keeps
+        //the cursor visible (standard pan-tool feel, and sidesteps the WSL cursor-warp bug for this path)
+        if(!bUsingWSL && ActiveMouseViewport == Viewport_Perspective)
         {
-            //hide and lock the cursor for FPS-style mouse-look while flying the camera
             glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         }
         bFirstCursorSample = true;
@@ -1013,6 +1046,7 @@ void MouseButtonEventCallback(GLFWwindow *Window, int Button, int Action, int Mo
         {
             glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         }
+        ActiveMouseViewport = -1;
     }
 }
 
@@ -1023,7 +1057,7 @@ void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
         return;
     }
 
-    if(!bRightMouseHeld)
+    if(!bRightMouseHeld || ActiveMouseViewport < 0)
     {
         return;
     }
@@ -1042,6 +1076,22 @@ void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
     LastCursorX = XPos;
     LastCursorY = YPos;
 
+    if(ActiveMouseViewport != Viewport_Perspective)
+    {
+        //ortho pan: translate along the viewport's own screen-space right/up (correct regardless of
+        //that camera's fixed pitch/yaw) so the content under the cursor follows the drag. PanScale
+        //converts screen pixels to world units - OrthoClipSize is the fixed world-space frustum
+        //height every ortho camera uses (see RecomputeViewportQuadrants), so dividing by the
+        //quadrant's pixel height gives world-units-per-pixel, same for both axes since the frustum
+        //width is aspect-corrected to match.
+        FViewport& VP = Viewports[ActiveMouseViewport];
+        const float PanScale = (float)(OrthoClipSize / (double)VP.QuadrantHeight);
+        VP.ViewportCamera.AddTranslation(
+            VP.ViewportCamera.GetRightVector() * (float)-DeltaX * PanScale +
+            VP.ViewportCamera.GetUpVector()    * (float)DeltaY * PanScale);
+        return;
+    }
+
     constexpr float MouseSensitivity = 0.15f;
     constexpr float MaxPitchDeg = 89.0f;
 
@@ -1056,9 +1106,72 @@ void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
     MainCamera.RotateLocal(MainCamera.GetRightVector(), PitchDelta);
 }
 
+//mouse-wheel zoom for whichever orthographic viewport (Top/Front/Right) the cursor is currently
+//over - GetViewportIndexAtCursor returns Viewport_Perspective unconditionally in single-view mode
+//and whenever the cursor is directly over the perspective quadrant, both deliberately excluded
+//here since scroll-to-zoom is an ortho-only interaction (the perspective camera uses WASDQE+RMB
+//fly instead). Zooms toward the cursor (the world point under it stays under it) rather than
+//toward the viewport's center, matching standard editor scroll-zoom behavior.
+void ScrollEventCallback(GLFWwindow* Window, double XOffset, double YOffset)
+{
+    if(ImGui::GetIO().WantCaptureMouse)
+    {
+        return;
+    }
+
+    double CursorX, CursorY;
+    glfwGetCursorPos(Window, &CursorX, &CursorY);
+    const int ViewportIndex = GetViewportIndexAtCursor(CursorX, CursorY);
+    if(ViewportIndex <= Viewport_Perspective)
+    {
+        return; //not over an ortho viewport (Perspective, or the border gap, which returns -1)
+    }
+
+    FViewport& VP = Viewports[ViewportIndex];
+
+    constexpr double ZoomStepFactor = 0.9; //multiplier per wheel notch; <1 shrinks the frustum (zooms in) on scroll-up
+    constexpr double MinOrthoWorldHeight = 1.0;
+    constexpr double MaxOrthoWorldHeight = 256.0;
+
+    const double OldWorldHeight = VP.OrthoWorldHeight;
+    const double NewWorldHeight = glm::clamp(OldWorldHeight * pow(ZoomStepFactor, YOffset), MinOrthoWorldHeight, MaxOrthoWorldHeight);
+    if(NewWorldHeight == OldWorldHeight)
+    {
+        return; //already at the zoom limit
+    }
+
+    //world units per pixel before/after - used below to find how far to shift the camera so the
+    //world point under the cursor stays under the cursor rather than the zoom recentering on the
+    //viewport's middle
+    const double OldWorldUnitsPerPixel = OldWorldHeight / (double)VP.QuadrantHeight;
+    const double NewWorldUnitsPerPixel = NewWorldHeight / (double)VP.QuadrantHeight;
+
+    //cursor offset from this viewport's quadrant center, in screen pixels. CursorX/Y are GLFW's
+    //top-left/Y-down convention, matching directly for X; QuadrantY is bottom-left origin (see
+    //FViewport) so its screen-space top edge is Height - (QuadrantY + QuadrantHeight)
+    const double QuadrantCenterX = (double)VP.QuadrantX + (double)VP.QuadrantWidth * 0.5;
+    const double QuadrantTopScreenY = (double)Height - (double)(VP.QuadrantY + VP.QuadrantHeight);
+    const double QuadrantCenterScreenY = QuadrantTopScreenY + (double)VP.QuadrantHeight * 0.5;
+    const double OffsetX = CursorX - QuadrantCenterX;
+    const double OffsetYScreen = CursorY - QuadrantCenterScreenY;
+
+    VP.OrthoWorldHeight = NewWorldHeight;
+    const double AspectRatio = (double)VP.QuadrantWidth / (double)VP.QuadrantHeight;
+    VP.ViewportCamera.SetClipDimensions(NewWorldHeight * AspectRatio, NewWorldHeight, 0.1, 1000.0);
+
+    //screen-right/screen-up in world space (Y flipped since screen-down is world "down" on screen,
+    //i.e. -Up), scaled by how much the world-units-per-pixel changed, shifts the camera so the same
+    //pixel still maps to the same world point post-zoom
+    const glm::vec3 WorldOffsetDir = VP.ViewportCamera.GetRightVector() * (float)OffsetX
+                                    - VP.ViewportCamera.GetUpVector() * (float)OffsetYScreen;
+    VP.ViewportCamera.AddTranslation(WorldOffsetDir * (float)(OldWorldUnitsPerPixel - NewWorldUnitsPerPixel));
+}
+
 void UpdateCameraMovement(GLFWwindow* Window, double DeltaTime)
 {
-    if(!bRightMouseHeld)
+    //WASDQE fly stays scoped to the perspective camera - not active while nothing is held
+    //(ActiveMouseViewport == -1) or while panning an ortho viewport
+    if(ActiveMouseViewport != Viewport_Perspective)
     {
         return;
     }
@@ -1141,9 +1254,11 @@ void RecomputeViewportQuadrants(int WindowWidth, int WindowHeight)
         else
         {
             //ortho cameras: ClipWidth/Height are world-space frustum size (see Camera.cpp), scaled
-            //by quadrant aspect ratio so a square in the scene stays square on screen
+            //by quadrant aspect ratio so a square in the scene stays square on screen. Uses this
+            //viewport's own zoom level (OrthoWorldHeight), not the fixed OrthoClipSize, so a window
+            //resize preserves whatever zoom the user has scrolled to (see ScrollEventCallback)
             const double AspectRatio = (double)VP.QuadrantWidth / (double)VP.QuadrantHeight;
-            VP.ViewportCamera.SetClipDimensions(OrthoClipSize * AspectRatio, OrthoClipSize, 0.1, 1000.0);
+            VP.ViewportCamera.SetClipDimensions(VP.OrthoWorldHeight * AspectRatio, VP.OrthoWorldHeight, 0.1, 1000.0);
         }
     }
 }
@@ -1198,6 +1313,7 @@ void CompositeFramebufferBackedViewports()
         BlitQuad->Draw(GL_TRIANGLES);
     }
 
+    glViewport(0, 0, Width, Height); //restore full-window viewport - callers (border/HUD/label text) assume it
     glEnable(GL_DEPTH_TEST); //restore the app-wide invariant everything else relies on
 }
 
@@ -1212,7 +1328,7 @@ void DrawViewportBorders()
         return;
     }
 
-    const glm::vec3 BorderColor(0.05f, 0.05f, 0.05f);
+    const glm::vec3 BorderColor(0.5f, 0.5f, 0.5f);
 
     glEnable(GL_SCISSOR_TEST);
     glClearColor(BorderColor.r, BorderColor.g, BorderColor.b, 1.0f);
