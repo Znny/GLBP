@@ -176,6 +176,15 @@ static float CameraPitchDeg = 0.0f;
 //border gap between quadrants, which is a no-op)
 static int ActiveMouseViewport = -1;
 
+//true only while LMB/MB3 is held AND the press landed in the perspective viewport (see
+//MouseButtonEventCallback) - unlike RMB, these two are perspective-only (see GetViewportIndexAtCursor),
+//so there's no per-viewport routing to latch, just a single "is this drag live" flag each.
+//bGlideActive: LMB - yaw with horizontal mouse movement, glide forward/back along the ground
+//(XZ) plane with vertical movement. bYZPanActive: MB3 - pan along the camera's local Up/Forward
+//(YZ) plane, no strafing.
+static bool bGlideActive = false;
+static bool bYZPanActive = false;
+
 //timing
 static double LastFrameTime = 0;
 static double ThisFrameTime = 0;
@@ -1017,36 +1026,89 @@ void MouseButtonEventCallback(GLFWwindow *Window, int Button, int Action, int Mo
         return;
     }
 
-    if(Button != GLFW_MOUSE_BUTTON_RIGHT)
+    if(Button == GLFW_MOUSE_BUTTON_RIGHT)
     {
-        return;
-    }
+        bRightMouseHeld = (Action == GLFW_PRESS);
 
-    bRightMouseHeld = (Action == GLFW_PRESS);
-
-    if(bRightMouseHeld)
-    {
-        double CursorX, CursorY;
-        glfwGetCursorPos(Window, &CursorX, &CursorY);
-        //latched for the duration of the drag - which viewport this targets doesn't change even if
-        //the cursor wanders into another quadrant while still held
-        ActiveMouseViewport = GetViewportIndexAtCursor(CursorX, CursorY);
-
-        //only the perspective fly-cam needs the FPS-style hidden/locked cursor; ortho panning keeps
-        //the cursor visible (standard pan-tool feel, and sidesteps the WSL cursor-warp bug for this path)
-        if(!bUsingWSL && ActiveMouseViewport == Viewport_Perspective)
+        if(bRightMouseHeld)
         {
-            glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            double CursorX, CursorY;
+            glfwGetCursorPos(Window, &CursorX, &CursorY);
+            //latched for the duration of the drag - which viewport this targets doesn't change even if
+            //the cursor wanders into another quadrant while still held
+            ActiveMouseViewport = GetViewportIndexAtCursor(CursorX, CursorY);
+
+            //only the perspective fly-cam needs the FPS-style hidden/locked cursor; ortho panning keeps
+            //the cursor visible (standard pan-tool feel, and sidesteps the WSL cursor-warp bug for this path)
+            if(!bUsingWSL && ActiveMouseViewport == Viewport_Perspective)
+            {
+                glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            }
+            bFirstCursorSample = true;
         }
-        bFirstCursorSample = true;
-    }
-    else
-    {
-        if(!bUsingWSL)
+        else
         {
-            glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            if(!bUsingWSL)
+            {
+                glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            }
+            ActiveMouseViewport = -1;
         }
-        ActiveMouseViewport = -1;
+    }
+    else if(Button == GLFW_MOUSE_BUTTON_LEFT)
+    {
+        //LMB "glide" is perspective-only (see GetViewportIndexAtCursor for the single-view-mode/
+        //quadrant hit-test) - a press elsewhere (an ortho quadrant, or the border gap) is just ignored
+        if(Action == GLFW_PRESS)
+        {
+            double CursorX, CursorY;
+            glfwGetCursorPos(Window, &CursorX, &CursorY);
+            bGlideActive = (GetViewportIndexAtCursor(CursorX, CursorY) == Viewport_Perspective);
+            if(bGlideActive)
+            {
+                //FPS-style hidden/locked cursor, same as RMB fly - glide's horizontal axis is a yaw look
+                if(!bUsingWSL)
+                {
+                    glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                }
+                bFirstCursorSample = true;
+            }
+        }
+        else if(bGlideActive)
+        {
+            if(!bUsingWSL)
+            {
+                glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            }
+            bGlideActive = false;
+        }
+    }
+    else if(Button == GLFW_MOUSE_BUTTON_MIDDLE)
+    {
+        //MB3 pan is perspective-only, same hit-test as LMB glide above; also hides/locks the cursor
+        //like RMB/LMB, so it doesn't wander off over ImGui or another quadrant mid-drag.
+        if(Action == GLFW_PRESS)
+        {
+            double CursorX, CursorY;
+            glfwGetCursorPos(Window, &CursorX, &CursorY);
+            bYZPanActive = (GetViewportIndexAtCursor(CursorX, CursorY) == Viewport_Perspective);
+            if(bYZPanActive)
+            {
+                if(!bUsingWSL)
+                {
+                    glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                }
+                bFirstCursorSample = true;
+            }
+        }
+        else
+        {
+            if(bYZPanActive && !bUsingWSL)
+            {
+                glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            }
+            bYZPanActive = false;
+        }
     }
 }
 
@@ -1057,7 +1119,8 @@ void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
         return;
     }
 
-    if(!bRightMouseHeld || ActiveMouseViewport < 0)
+    const bool bRightDragActive = bRightMouseHeld && ActiveMouseViewport >= 0;
+    if(!bRightDragActive && !bGlideActive && !bYZPanActive)
     {
         return;
     }
@@ -1075,6 +1138,38 @@ void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
     const double DeltaY = YPos - LastCursorY;
     LastCursorX = XPos;
     LastCursorY = YPos;
+
+    if(bGlideActive)
+    {
+        //LMB glide: horizontal mouse yaws the camera (same feel as RMB fly's yaw), vertical mouse
+        //glides forward/back along the ground (XZ) plane instead of pitching - GroundForward zeroes
+        //out any Y component of the camera's current facing so height never changes from this,
+        //regardless of whatever pitch the camera was left at by a previous RMB fly.
+        constexpr float GlideYawSensitivity = 0.15f;
+        constexpr float GlideMoveSensitivity = 0.03f; //world units per pixel of vertical mouse movement
+
+        MainCamera.RotateLocal(Transform::WorldUp, (float)-DeltaX * GlideYawSensitivity);
+
+        glm::vec3 GroundForward = MainCamera.GetForwardVector();
+        GroundForward.y = 0.0f;
+        if(glm::length(GroundForward) > 0.0001f)
+        {
+            MainCamera.AddTranslation(glm::normalize(GroundForward) * (float)DeltaY * GlideMoveSensitivity);
+        }
+        return;
+    }
+
+    if(bYZPanActive)
+    {
+        //MB3 pan: translate along the camera's local Right/Up plane (standard screen-space pan), no
+        //dolly - both axes inverted relative to the ortho RMB-pan's "content follows cursor"
+        //convention above, per feel testing.
+        constexpr float YZPanSensitivity = 0.03f;
+        MainCamera.AddTranslation(
+            MainCamera.GetRightVector() * (float)DeltaX * YZPanSensitivity +
+            MainCamera.GetUpVector()    * (float)-DeltaY * YZPanSensitivity);
+        return;
+    }
 
     if(ActiveMouseViewport != Viewport_Perspective)
     {
