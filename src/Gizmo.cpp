@@ -8,6 +8,7 @@
 
 #include "ShaderManager.h"
 #include "ShaderProgram.h"
+#include "Camera.h"
 
 namespace
 {
@@ -320,7 +321,7 @@ TransformGizmo::FGizmoMesh TransformGizmo::UploadMesh(const std::vector<glm::vec
     return Mesh;
 }
 
-void TransformGizmo::Draw(const Transform& Target, const glm::vec3& CameraLocation)
+void TransformGizmo::Draw(const Transform& Target, const Camera& Cam)
 {
     if (!bInitialized || !Shader || !CurrentMesh)
     {
@@ -328,9 +329,10 @@ void TransformGizmo::Draw(const Transform& Target, const glm::vec3& CameraLocati
     }
 
     const glm::vec3 TargetLocation = Target.GetLocation();
-    const float GizmoScale = ComputeScale(CameraLocation, TargetLocation);
+    const float GizmoScale = ComputeScale(Cam, TargetLocation);
 
-    const glm::mat4 ModelMatrix = glm::translate(glm::mat4(1.0f), TargetLocation) * glm::scale(glm::mat4(1.0f), glm::vec3(GizmoScale));
+    const glm::mat4 RotationMatrix = (Space == EGizmoSpace::Local) ? glm::toMat4(Target.GetRotation()) : glm::mat4(1.0f);
+    const glm::mat4 ModelMatrix = glm::translate(glm::mat4(1.0f), TargetLocation) * RotationMatrix * glm::scale(glm::mat4(1.0f), glm::vec3(GizmoScale));
 
     const GLuint ProgramID = Shader->GetProgramID();
     glUseProgram(ProgramID);
@@ -398,23 +400,36 @@ glm::vec3 TransformGizmo::GetAxisDirection(EGizmoAxis Axis)
     return AxisDirection(AxisEnumToIndex(Axis));
 }
 
-float TransformGizmo::ComputeScale(const glm::vec3& CameraLocation, const glm::vec3& TargetLocation)
+glm::vec3 TransformGizmo::GetEffectiveAxisDirection(EGizmoAxis Axis, const glm::quat& TargetRotation) const
 {
+    const glm::vec3 WorldAxis = GetAxisDirection(Axis);
+    return Space == EGizmoSpace::Local ? glm::normalize(TargetRotation * WorldAxis) : WorldAxis;
+}
+
+float TransformGizmo::ComputeScale(const Camera& Cam, const glm::vec3& TargetLocation)
+{
+    if (Cam.GetProjectionMode() == ECameraProjectionMode::Orthographic)
+    {
+        // an orthographic camera's apparent size doesn't depend on distance at all - it depends
+        // on that viewport's zoom (world-space frustum height), so track that instead
+        return (float)Cam.GetClipHeight() * 0.15f;
+    }
+
     // keep a roughly constant apparent size on screen regardless of distance from the camera
-    const float DistanceToCamera = glm::length(CameraLocation - TargetLocation);
+    const float DistanceToCamera = glm::length(Cam.GetLocation() - TargetLocation);
     return DistanceToCamera * 0.15f;
 }
 
-EGizmoAxis TransformGizmo::PickAxis(const glm::vec3& RayOrigin, const glm::vec3& RayDirection, const glm::vec3& TargetLocation, float GizmoScale) const
+EGizmoAxis TransformGizmo::PickAxis(const glm::vec3& RayOrigin, const glm::vec3& RayDirection, const glm::vec3& TargetLocation, const glm::quat& TargetRotation, float GizmoScale) const
 {
     if (Mode == EGizmoMode::Rotate)
     {
-        return PickRotateAxis(RayOrigin, RayDirection, TargetLocation, GizmoScale);
+        return PickRotateAxis(RayOrigin, RayDirection, TargetLocation, TargetRotation, GizmoScale);
     }
-    return PickLinearAxis(RayOrigin, RayDirection, TargetLocation, GizmoScale);
+    return PickLinearAxis(RayOrigin, RayDirection, TargetLocation, TargetRotation, GizmoScale);
 }
 
-EGizmoAxis TransformGizmo::PickLinearAxis(const glm::vec3& RayOrigin, const glm::vec3& RayDirection, const glm::vec3& TargetLocation, float GizmoScale) const
+EGizmoAxis TransformGizmo::PickLinearAxis(const glm::vec3& RayOrigin, const glm::vec3& RayDirection, const glm::vec3& TargetLocation, const glm::quat& TargetRotation, float GizmoScale) const
 {
     const float HandleLength = (Mode == EGizmoMode::Translate ? (TranslateShaftLength + TranslateHeadLength) : ScaleShaftLength) * GizmoScale;
     constexpr float HitRadiusFactor = 0.14f;
@@ -424,7 +439,8 @@ EGizmoAxis TransformGizmo::PickLinearAxis(const glm::vec3& RayOrigin, const glm:
 
     for (int Axis = 0; Axis < 3; ++Axis)
     {
-        const float Distance = ClosestDistanceRaySegment(RayOrigin, RayDirection, TargetLocation, AxisDirection(Axis), HandleLength);
+        const glm::vec3 AxisEnumDirection = GetEffectiveAxisDirection(IndexToAxisEnum(Axis), TargetRotation);
+        const float Distance = ClosestDistanceRaySegment(RayOrigin, RayDirection, TargetLocation, AxisEnumDirection, HandleLength);
         if (Distance < BestDistance)
         {
             BestDistance = Distance;
@@ -434,7 +450,7 @@ EGizmoAxis TransformGizmo::PickLinearAxis(const glm::vec3& RayOrigin, const glm:
     return Best;
 }
 
-EGizmoAxis TransformGizmo::PickRotateAxis(const glm::vec3& RayOrigin, const glm::vec3& RayDirection, const glm::vec3& TargetLocation, float GizmoScale) const
+EGizmoAxis TransformGizmo::PickRotateAxis(const glm::vec3& RayOrigin, const glm::vec3& RayDirection, const glm::vec3& TargetLocation, const glm::quat& TargetRotation, float GizmoScale) const
 {
     constexpr float RingHitToleranceFactor = 0.12f;
 
@@ -443,7 +459,7 @@ EGizmoAxis TransformGizmo::PickRotateAxis(const glm::vec3& RayOrigin, const glm:
 
     for (int Axis = 0; Axis < 3; ++Axis)
     {
-        const glm::vec3 PlaneNormal = AxisDirection(Axis);
+        const glm::vec3 PlaneNormal = GetEffectiveAxisDirection(IndexToAxisEnum(Axis), TargetRotation);
         const float Denom = glm::dot(RayDirection, PlaneNormal);
         if (std::abs(Denom) < 1e-5f)
         {

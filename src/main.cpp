@@ -72,9 +72,10 @@ void MouseButtonEventCallback(GLFWwindow* Window, int Button, int Action, int Mo
 void CursorPositionEventCallback(GLFWwindow* Window, double XPos, double YPos);
 void ScrollEventCallback(GLFWwindow* Window, double XOffset, double YOffset);
 int GetViewportIndexAtCursor(double CursorX, double CursorY);
-void GetPerspectiveViewportRect(int& OutX, int& OutY, int& OutW, int& OutH);
+void GetViewportRect(int ViewportIndex, int& OutX, int& OutY, int& OutW, int& OutH);
 void ScreenPointToWorldRay(double CursorX, double CursorY, Camera& Cam, int RectX, int RectY, int RectW, int RectH, glm::vec3& OutRayOrigin, glm::vec3& OutRayDirection);
 bool ProjectWorldToScreen(const glm::vec3& WorldPoint, const glm::mat4& ViewProjectionMatrix, int RectX, int RectY, int RectW, int RectH, glm::vec2& OutPixel);
+void ToggleGizmoSpace();
 void WindowResizeEventCallback(GLFWwindow* Window, int NewWidth, int NewHeight);
 
 void ErrorCallback(int error, const char* description);
@@ -165,9 +166,13 @@ Grid ViewportGrid;
 //screen-space texts
 SSTextRenderer TextRenderer;
 
-//when true, all 4 Viewports render simultaneously into a 2x2 grid instead of just the
-//perspective camera rendering fullscreen. Toggled by Space (KeyboardEventCallback).
+//when true, all 4 Viewports render simultaneously into a 2x2 grid instead of just one
+//rendering fullscreen. Toggled by Space (KeyboardEventCallback).
 static bool bMultiViewMode = false;
+
+//which viewport fills the screen when !bMultiViewMode - Space (KeyboardEventCallback) sets this to
+//whichever viewport the cursor is over at the moment it's pressed, rather than always Perspective
+static int FullscreenViewportIndex = Viewport_Perspective;
 
 //vsync state, toggled by F7 (KeyboardEventCallback) - matches the glfwSwapInterval(1) set at
 //startup in InitGraphics()
@@ -194,11 +199,13 @@ static int ActiveMouseViewport = -1;
 static bool bGlideActive = false;
 static bool bYZPanActive = false;
 
-//gizmo drag state - LMB press checks for a gizmo-axis hit before falling back to bGlideActive
-//above, so a drag on a handle takes priority over camera glide (perspective-viewport only, same
-//scoping as bGlideActive/bYZPanActive)
+//gizmo drag state - LMB press checks for a gizmo-axis hit (in whichever viewport the cursor is
+//over) before falling back to bGlideActive above, so a drag on a handle takes priority over
+//camera glide. GizmoDragViewport is latched at press time, mirroring ActiveMouseViewport, since
+//unlike glide/pan the gizmo now works in any viewport, not just Perspective.
 static bool bGizmoDragActive = false;
 static EGizmoAxis GizmoDragAxis = EGizmoAxis::None;
+static int GizmoDragViewport = -1;
 
 //timing
 static double LastFrameTime = 0;
@@ -831,24 +838,26 @@ void Render(double dt)
     ImGui::SameLine(); if(ImGui::Button("Tetrahedron")) SelectNode(TetrahedronNode);
     ImGui::SameLine(); if(ImGui::Button("HexTorus")) SelectNode(HexTorusNode);
     ImGui::SameLine(); if(ImGui::Button("TexturedCube")) SelectNode(TexturedCubeNode);
+    if(ImGui::Button(Gizmo.GetSpace() == EGizmoSpace::World ? "Space: World" : "Space: Local")) ToggleGizmoSpace();
     ImGui::End();
 
     const double Red = 0.0f;//cos(ThisFrameTime);
     const double Green = 0.0f;//cos(ThisFrameTime);
     const double Blue = 0.0f;//cos(ThisFrameTime);
 
-    //in single-view mode only the perspective camera (index 0) renders, fullscreen; in multi-view
-    //mode all 4 render, each confined to its own screen quadrant
+    //in single-view mode only FullscreenViewportIndex renders, fullscreen; in multi-view mode all
+    //4 render, each confined to its own screen quadrant
     const int ActiveViewportCount = bMultiViewMode ? ViewportCount : 1;
 
     glEnable(GL_DEPTH_TEST);
 
-    for(int i = 0; i < ActiveViewportCount; i++)
+    for(int Iteration = 0; Iteration < ActiveViewportCount; Iteration++)
     {
-        FViewport& VP = Viewports[i];
+        const int ViewportIndex = bMultiViewMode ? Iteration : FullscreenViewportIndex;
+        FViewport& VP = Viewports[ViewportIndex];
 
-        //this frame's actual target rect: full window in single-view mode (only viewport 0 is
-        //ever active then), or this viewport's quadrant in multi-view mode
+        //this frame's actual target rect: full window in single-view mode (only
+        //FullscreenViewportIndex is ever active then), or this viewport's quadrant in multi-view mode
         const int RectX = bMultiViewMode ? VP.QuadrantX : 0;
         const int RectY = bMultiViewMode ? VP.QuadrantY : 0;
         const int RectW = bMultiViewMode ? VP.QuadrantWidth : Width;
@@ -924,17 +933,16 @@ void Render(double dt)
         //disables depth testing) still overlays on top of it
         ViewportGrid.Draw(VP.ViewportCamera, VP.GridTangent, VP.GridBitangent);
 
-        //gizmo stays perspective-only - drawn here (not after the loop) so it's naturally
-        //confined to the perspective viewport's own rect/scissor in multi-view mode too. Synced
-        //each frame from SelectedNode's *resolved world* position/rotation (not its bare local
-        //transform, which for a child like HexTorus wouldn't reflect where it actually is) -
-        //rotation isn't consumed by Draw() yet but is threaded through for a future world-space-
-        //vs-local-space gizmo toggle.
+        //drawn here (not after the loop) so it's naturally confined to this viewport's own
+        //rect/scissor - draws in whichever viewport(s) are actually being rendered this frame,
+        //not just Perspective. Synced each frame from SelectedNode's *resolved world*
+        //position/rotation (not its bare local transform, which for a child like HexTorus
+        //wouldn't reflect where it actually is).
         if(SelectedNode.IsValid())
         {
             GizmoTargetTransform.SetTranslation(glm::vec3(MainSceneGraph.GetWorldMatrix(SelectedNode)[3]));
             GizmoTargetTransform.SetRotation(MainSceneGraph.GetWorldRotation(SelectedNode));
-            Gizmo.Draw(GizmoTargetTransform, VP.ViewportCamera.GetLocation());
+            Gizmo.Draw(GizmoTargetTransform, VP.ViewportCamera);
         }
 
         if(VP.ViewportFramebuffer)
@@ -957,14 +965,15 @@ void Render(double dt)
     //label each active viewport (e.g. "Top (+Y)") so it's clear which is which in multi-view mode -
     //axis matches that viewport's camera position set up in InitGraphics() (Top sits at +Y looking
     //down, Front at +Z, Right at +X)
-    for(int i = 0; i < ActiveViewportCount; i++)
+    for(int Iteration = 0; Iteration < ActiveViewportCount; Iteration++)
     {
-        const FViewport& VP = Viewports[i];
+        const int ViewportIndex = bMultiViewMode ? Iteration : FullscreenViewportIndex;
+        const FViewport& VP = Viewports[ViewportIndex];
 
         const char* Label = "Perspective";
-        if(i == Viewport_Top)    Label = "Top (+Y)";
-        else if(i == Viewport_Front)  Label = "Front (+Z)";
-        else if(i == Viewport_Right)  Label = "Right (+X)";
+        if(ViewportIndex == Viewport_Top)    Label = "Top (+Y)";
+        else if(ViewportIndex == Viewport_Front)  Label = "Front (+Z)";
+        else if(ViewportIndex == Viewport_Right)  Label = "Right (+X)";
 
         const int RectX = bMultiViewMode ? VP.QuadrantX : 0;
         const int RectY = bMultiViewMode ? VP.QuadrantY : 0;
@@ -1060,6 +1069,11 @@ void ToggleVsync()
     LogInfo("vsync %s\n", bVsyncEnabled ? "enabled" : "disabled");
 }
 
+void ToggleGizmoSpace()
+{
+    Gizmo.SetSpace(Gizmo.GetSpace() == EGizmoSpace::World ? EGizmoSpace::Local : EGizmoSpace::World);
+}
+
 void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Action, int Modifiers)
 {
     //don't let gizmo/camera hotkeys fire while an ImGui widget (e.g. a text field) wants the keyboard
@@ -1091,7 +1105,27 @@ void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Ac
 
     if(KeyCode == GLFW_KEY_SPACE)
     {
-        bMultiViewMode = !bMultiViewMode;
+        if(bMultiViewMode)
+        {
+            //entering single-view mode - fullscreen whichever quadrant the cursor is currently
+            //over, rather than always snapping to Perspective. A press over the border gap
+            //(-1) is a no-op, staying in the grid.
+            double CursorX, CursorY;
+            glfwGetCursorPos(Window, &CursorX, &CursorY);
+            const int HitViewport = GetViewportIndexAtCursor(CursorX, CursorY);
+            if(HitViewport >= 0)
+            {
+                FullscreenViewportIndex = HitViewport;
+                bMultiViewMode = false;
+            }
+        }
+        else
+        {
+            bMultiViewMode = true;
+        }
+
+        //aspect ratios depend on which viewport is fullscreen now, not just window size
+        RecomputeViewportQuadrants(Width, Height);
         return;
     }
 
@@ -1122,16 +1156,16 @@ void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Ac
     }
 }
 
-//which viewport (if any) a screen-space cursor position falls within - Perspective always claims
-//the whole window in single-view mode since it's the only thing rendering; in multi-view mode each
-//of the 4 quadrants is hit-tested via its Quadrant* rect, returning -1 for the border gap between
-//them. CursorX/Y are in GLFW's convention (top-left origin, Y down); Quadrant* is bottom-left
-//origin (matches glViewport/glScissor), so Y is flipped before comparing.
+//which viewport (if any) a screen-space cursor position falls within - FullscreenViewportIndex
+//always claims the whole window in single-view mode since it's the only thing rendering; in
+//multi-view mode each of the 4 quadrants is hit-tested via its Quadrant* rect, returning -1 for
+//the border gap between them. CursorX/Y are in GLFW's convention (top-left origin, Y down);
+//Quadrant* is bottom-left origin (matches glViewport/glScissor), so Y is flipped before comparing.
 int GetViewportIndexAtCursor(double CursorX, double CursorY)
 {
     if(!bMultiViewMode)
     {
-        return Viewport_Perspective;
+        return FullscreenViewportIndex;
     }
 
     const double FlippedY = (double)Height - CursorY;
@@ -1147,17 +1181,18 @@ int GetViewportIndexAtCursor(double CursorX, double CursorY)
     return -1;
 }
 
-//the perspective viewport's current on-screen rect, in the same bottom-left-origin convention as
+//a viewport's current on-screen rect, in the same bottom-left-origin convention as
 //glViewport/glScissor - matches the RectX/Y/W/H computation already duplicated at each per-viewport
-//draw site (e.g. in Render()), just for the two gizmo-picking call sites below, which sit outside
+//draw site (e.g. in Render()), just for the gizmo pick/drag call sites below, which sit outside
 //that per-viewport loop
-void GetPerspectiveViewportRect(int& OutX, int& OutY, int& OutW, int& OutH)
+void GetViewportRect(int ViewportIndex, int& OutX, int& OutY, int& OutW, int& OutH)
 {
-    const FViewport& VP = Viewports[Viewport_Perspective];
-    OutX = bMultiViewMode ? VP.QuadrantX : 0;
-    OutY = bMultiViewMode ? VP.QuadrantY : 0;
-    OutW = bMultiViewMode ? VP.QuadrantWidth : Width;
-    OutH = bMultiViewMode ? VP.QuadrantHeight : Height;
+    const FViewport& VP = Viewports[ViewportIndex];
+    const bool bIsFullscreen = !bMultiViewMode && (ViewportIndex == FullscreenViewportIndex);
+    OutX = bIsFullscreen ? 0 : VP.QuadrantX;
+    OutY = bIsFullscreen ? 0 : VP.QuadrantY;
+    OutW = bIsFullscreen ? Width : VP.QuadrantWidth;
+    OutH = bIsFullscreen ? Height : VP.QuadrantHeight;
 }
 
 //unprojects a cursor pixel (GLFW convention: top-left origin, Y down) into a world-space ray,
@@ -1239,38 +1274,41 @@ void MouseButtonEventCallback(GLFWwindow *Window, int Button, int Action, int Mo
     else if(Button == GLFW_MOUSE_BUTTON_LEFT)
     {
         //LMB "glide" is perspective-only (see GetViewportIndexAtCursor for the single-view-mode/
-        //quadrant hit-test) - a press elsewhere (an ortho quadrant, or the border gap) is just ignored.
-        //A press that hits a gizmo handle starts a gizmo drag instead of glide.
+        //quadrant hit-test) - a press elsewhere (an ortho quadrant, or the border gap) is just ignored,
+        //unless it hits a gizmo handle, which works in any viewport and starts a gizmo drag instead.
         if(Action == GLFW_PRESS)
         {
             double CursorX, CursorY;
             glfwGetCursorPos(Window, &CursorX, &CursorY);
-            const bool bInPerspectiveViewport = (GetViewportIndexAtCursor(CursorX, CursorY) == Viewport_Perspective);
+            const int HitViewport = GetViewportIndexAtCursor(CursorX, CursorY);
 
             bGizmoDragActive = false;
-            if(bInPerspectiveViewport && SelectedNode.IsValid())
+            if(HitViewport >= 0 && SelectedNode.IsValid())
             {
+                Camera& HitCamera = Viewports[HitViewport].ViewportCamera;
                 int RectX, RectY, RectW, RectH;
-                GetPerspectiveViewportRect(RectX, RectY, RectW, RectH);
+                GetViewportRect(HitViewport, RectX, RectY, RectW, RectH);
 
                 glm::vec3 RayOrigin, RayDirection;
-                ScreenPointToWorldRay(CursorX, CursorY, MainCamera, RectX, RectY, RectW, RectH, RayOrigin, RayDirection);
+                ScreenPointToWorldRay(CursorX, CursorY, HitCamera, RectX, RectY, RectW, RectH, RayOrigin, RayDirection);
 
                 const glm::vec3 TargetLocation = glm::vec3(MainSceneGraph.GetWorldMatrix(SelectedNode)[3]);
-                const float GizmoScale = TransformGizmo::ComputeScale(MainCamera.GetLocation(), TargetLocation);
-                const EGizmoAxis PickedAxis = Gizmo.PickAxis(RayOrigin, RayDirection, TargetLocation, GizmoScale);
+                const glm::quat TargetRotation = MainSceneGraph.GetWorldRotation(SelectedNode);
+                const float GizmoScale = TransformGizmo::ComputeScale(HitCamera, TargetLocation);
+                const EGizmoAxis PickedAxis = Gizmo.PickAxis(RayOrigin, RayDirection, TargetLocation, TargetRotation, GizmoScale);
 
                 if(PickedAxis != EGizmoAxis::None)
                 {
                     bGizmoDragActive = true;
                     GizmoDragAxis = PickedAxis;
+                    GizmoDragViewport = HitViewport;
                     bFirstCursorSample = true;
                 }
             }
 
             if(!bGizmoDragActive)
             {
-                bGlideActive = bInPerspectiveViewport;
+                bGlideActive = (HitViewport == Viewport_Perspective);
                 if(bGlideActive)
                 {
                     //FPS-style hidden/locked cursor, same as RMB fly - glide's horizontal axis is a yaw look
@@ -1286,6 +1324,7 @@ void MouseButtonEventCallback(GLFWwindow *Window, int Button, int Action, int Mo
         {
             bGizmoDragActive = false;
             GizmoDragAxis = EGizmoAxis::None;
+            GizmoDragViewport = -1;
         }
         else if(bGlideActive)
         {
@@ -1357,11 +1396,15 @@ void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
     if(bGizmoDragActive)
     {
         int RectX, RectY, RectW, RectH;
-        GetPerspectiveViewportRect(RectX, RectY, RectW, RectH);
+        GetViewportRect(GizmoDragViewport, RectX, RectY, RectW, RectH);
 
-        const glm::mat4 ViewProjectionMatrix = MainCamera.GetViewProjectionMatrix();
+        const glm::mat4 ViewProjectionMatrix = Viewports[GizmoDragViewport].ViewportCamera.GetViewProjectionMatrix();
         const glm::vec3 TargetLocation = glm::vec3(MainSceneGraph.GetWorldMatrix(SelectedNode)[3]);
-        const glm::vec3 WorldAxisDirection = TransformGizmo::GetAxisDirection(GizmoDragAxis);
+        const glm::quat TargetRotation = MainSceneGraph.GetWorldRotation(SelectedNode);
+        //whichever world-space direction axis GizmoDragAxis currently represents on screen - raw
+        //world X/Y/Z in World space, or that axis rotated into TargetRotation's frame in Local
+        //space (see TransformGizmo::GetEffectiveAxisDirection)
+        const glm::vec3 EffectiveDirection = Gizmo.GetEffectiveAxisDirection(GizmoDragAxis, TargetRotation);
 
         float Delta = 0.0f;
         if(Gizmo.GetMode() == EGizmoMode::Rotate)
@@ -1390,7 +1433,7 @@ void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
             //moves/scales the object, regardless of camera angle
             glm::vec2 ScreenOrigin, ScreenAxisTip;
             if(ProjectWorldToScreen(TargetLocation, ViewProjectionMatrix, RectX, RectY, RectW, RectH, ScreenOrigin) &&
-               ProjectWorldToScreen(TargetLocation + WorldAxisDirection, ViewProjectionMatrix, RectX, RectY, RectW, RectH, ScreenAxisTip) &&
+               ProjectWorldToScreen(TargetLocation + EffectiveDirection, ViewProjectionMatrix, RectX, RectY, RectW, RectH, ScreenAxisTip) &&
                ScreenAxisTip != ScreenOrigin)
             {
                 const glm::vec2 ScreenAxisDirection = glm::normalize(ScreenAxisTip - ScreenOrigin);
@@ -1402,22 +1445,34 @@ void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
             }
         }
 
-        //Translate/Rotate deltas are computed in world space above but must be applied in the
-        //target's own local space - for a root node local==world so Direction passes through
-        //unchanged, but for a parented node (e.g. HexTorus) it needs converting into the parent's
-        //frame first. Scale is always expressed in the target's own local axes regardless of
-        //parent, so it never needs this conversion.
-        glm::vec3 Direction = WorldAxisDirection;
-        const NodeHandle ParentHandle = MainSceneGraph.GetNode(SelectedNode)->GetParent();
-        if(ParentHandle.IsValid())
+        //Target.SetScale() is basis-intrinsic to the object's own unrotated local axes by
+        //definition (TRS order applies Scale before Rotate) - so Scale always uses the raw,
+        //unrotated axis regardless of the World/Local space toggle (which only affects how the
+        //handles are drawn/picked, not what Scale means), and skips parent-relative conversion
+        //for the same "always local-axis-intrinsic" reason.
+        //
+        //Translate/Rotate deltas are computed in world space above (EffectiveDirection) but must
+        //be applied in the target's own local space - for a root node local==world so Direction
+        //passes through unchanged, but for a parented node (e.g. HexTorus) it needs converting
+        //into the parent's frame first.
+        glm::vec3 Direction = EffectiveDirection;
+        if(Gizmo.GetMode() == EGizmoMode::Scale)
         {
-            if(Gizmo.GetMode() == EGizmoMode::Translate)
+            Direction = TransformGizmo::GetAxisDirection(GizmoDragAxis);
+        }
+        else
+        {
+            const NodeHandle ParentHandle = MainSceneGraph.GetNode(SelectedNode)->GetParent();
+            if(ParentHandle.IsValid())
             {
-                Direction = glm::vec3(glm::inverse(MainSceneGraph.GetWorldMatrix(ParentHandle)) * glm::vec4(WorldAxisDirection, 0.0f));
-            }
-            else if(Gizmo.GetMode() == EGizmoMode::Rotate)
-            {
-                Direction = glm::inverse(MainSceneGraph.GetWorldRotation(ParentHandle)) * WorldAxisDirection;
+                if(Gizmo.GetMode() == EGizmoMode::Translate)
+                {
+                    Direction = glm::vec3(glm::inverse(MainSceneGraph.GetWorldMatrix(ParentHandle)) * glm::vec4(EffectiveDirection, 0.0f));
+                }
+                else if(Gizmo.GetMode() == EGizmoMode::Rotate)
+                {
+                    Direction = glm::inverse(MainSceneGraph.GetWorldRotation(ParentHandle)) * EffectiveDirection;
+                }
             }
         }
 
@@ -1616,17 +1671,23 @@ void RecomputeViewportQuadrants(int WindowWidth, int WindowHeight)
         VP.QuadrantWidth = QuadW[i];
         VP.QuadrantHeight = QuadH[i];
 
+        //whichever dimensions this viewport is actually being rendered at right now - the full
+        //window if it's the one currently fullscreen, otherwise its own quadrant
+        const bool bIsFullscreen = !bMultiViewMode && (i == FullscreenViewportIndex);
+        const double EffectiveWidth = bIsFullscreen ? (double)WindowWidth : (double)VP.QuadrantWidth;
+        const double EffectiveHeight = bIsFullscreen ? (double)WindowHeight : (double)VP.QuadrantHeight;
+
         if(i == Viewport_Perspective)
         {
-            VP.ViewportCamera.SetClipDimensions((double)WindowWidth, (double)WindowHeight, 0.1, 1000.0);
+            VP.ViewportCamera.SetClipDimensions(EffectiveWidth, EffectiveHeight, 0.1, 1000.0);
         }
         else
         {
             //ortho cameras: ClipWidth/Height are world-space frustum size (see Camera.cpp), scaled
-            //by quadrant aspect ratio so a square in the scene stays square on screen. Uses this
-            //viewport's own zoom level (OrthoWorldHeight), not the fixed OrthoClipSize, so a window
-            //resize preserves whatever zoom the user has scrolled to (see ScrollEventCallback)
-            const double AspectRatio = (double)VP.QuadrantWidth / (double)VP.QuadrantHeight;
+            //by aspect ratio so a square in the scene stays square on screen. Uses this viewport's
+            //own zoom level (OrthoWorldHeight), not the fixed OrthoClipSize, so a window resize
+            //preserves whatever zoom the user has scrolled to (see ScrollEventCallback)
+            const double AspectRatio = EffectiveWidth / EffectiveHeight;
             VP.ViewportCamera.SetClipDimensions(VP.OrthoWorldHeight * AspectRatio, VP.OrthoWorldHeight, 0.1, 1000.0);
         }
     }
@@ -1644,9 +1705,10 @@ void CompositeFramebufferBackedViewports()
     const int ActiveViewportCount = bMultiViewMode ? ViewportCount : 1;
 
     bool bAnyComposited = false;
-    for(int i = 0; i < ActiveViewportCount; i++)
+    for(int Iteration = 0; Iteration < ActiveViewportCount; Iteration++)
     {
-        if(Viewports[i].ViewportFramebuffer)
+        const int ViewportIndex = bMultiViewMode ? Iteration : FullscreenViewportIndex;
+        if(Viewports[ViewportIndex].ViewportFramebuffer)
         {
             bAnyComposited = true;
             break;
@@ -1664,9 +1726,10 @@ void CompositeFramebufferBackedViewports()
     glUseProgram(BlitShaderProgram->GetProgramID());
     glUniform1i(glGetUniformLocation(BlitShaderProgram->GetProgramID(), "TexSampler"), 0);
 
-    for(int i = 0; i < ActiveViewportCount; i++)
+    for(int Iteration = 0; Iteration < ActiveViewportCount; Iteration++)
     {
-        const FViewport& VP = Viewports[i];
+        const int ViewportIndex = bMultiViewMode ? Iteration : FullscreenViewportIndex;
+        const FViewport& VP = Viewports[ViewportIndex];
         if(!VP.ViewportFramebuffer)
         {
             continue;

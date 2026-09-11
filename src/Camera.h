@@ -22,6 +22,7 @@ public:
                     double VerticalFOV = 45.0 );
 
     void SetProjectionMode(const ECameraProjectionMode& Mode);
+    ECameraProjectionMode GetProjectionMode() const { return ProjectionMode; }
 
     // Width/Height mean different things depending on ProjectionMode: pixel dimensions in
     // Perspective mode (only their ratio matters, for aspect ratio), but world-space frustum
@@ -32,6 +33,7 @@ public:
     void SetClipHeight(double Height);
     void SetClipNear(double Near);
     void SetClipFar(double Far);
+    double GetClipHeight() const { return ClipHeight; }
 
     const glm::mat4& GetProjectionMatrix() const;
     glm::mat4 GetViewProjectionMatrix();
