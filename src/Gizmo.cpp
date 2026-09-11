@@ -1,6 +1,7 @@
 #include "Gizmo.h"
 
 #include <cmath>
+#include <algorithm>
 
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -175,6 +176,67 @@ namespace
         AddLine(LinePos, LineCol, glm::vec3(0.0f), Tip, Color);
         AddBox(TriPos, TriCol, Tip, HalfBoxExtent, Color);
     }
+
+    // shared handle-geometry constants, referenced by both mesh generation above and picking below
+    constexpr float TranslateShaftLength = 0.8f;
+    constexpr float TranslateHeadLength = 0.25f;
+    constexpr float ScaleShaftLength = 0.8f;
+    constexpr float RotateRingRadius = 1.0f;
+
+    EGizmoAxis IndexToAxisEnum(int Axis)
+    {
+        switch(Axis)
+        {
+            case 0:  return EGizmoAxis::X;
+            case 1:  return EGizmoAxis::Y;
+            default: return EGizmoAxis::Z;
+        }
+    }
+
+    int AxisEnumToIndex(EGizmoAxis Axis)
+    {
+        switch(Axis)
+        {
+            case EGizmoAxis::X: return 0;
+            case EGizmoAxis::Y: return 1;
+            case EGizmoAxis::Z: return 2;
+            default: return -1;
+        }
+    }
+
+    // Approximate closest distance (world units) between an infinite ray (RayOrigin + t*RayDir,
+    // t>=0, RayDir unit-length) and a finite segment (SegStart to SegStart + SegDir*SegLength,
+    // SegDir unit-length). Standard closest-point-between-two-lines formula, then clamped to the
+    // segment's range and the ray's t>=0 - good enough for interactive picking, not a fully exact
+    // clamped-segment-vs-ray solver.
+    float ClosestDistanceRaySegment(const glm::vec3& RayOrigin, const glm::vec3& RayDir,
+                                      const glm::vec3& SegStart, const glm::vec3& SegDir, float SegLength)
+    {
+        const glm::vec3 r = RayOrigin - SegStart;
+        const float b = glm::dot(RayDir, SegDir);
+        const float c = glm::dot(RayDir, r);
+        const float f = glm::dot(SegDir, r);
+        const float denom = 1.0f - b * b; // a=dot(RayDir,RayDir)=1, e=dot(SegDir,SegDir)=1
+
+        float t, s;
+        if (std::abs(denom) > 1e-6f)
+        {
+            t = (b * f - c) / denom;
+            s = (f - b * c) / denom;
+        }
+        else
+        {
+            t = 0.0f;
+            s = f;
+        }
+
+        t = std::max(t, 0.0f);
+        s = std::clamp(s, 0.0f, SegLength);
+
+        const glm::vec3 ClosestOnRay = RayOrigin + RayDir * t;
+        const glm::vec3 ClosestOnSeg = SegStart + SegDir * s;
+        return glm::length(ClosestOnRay - ClosestOnSeg);
+    }
 }
 
 void TransformGizmo::Initialize()
@@ -266,10 +328,7 @@ void TransformGizmo::Draw(const Transform& Target, const glm::vec3& CameraLocati
     }
 
     const glm::vec3 TargetLocation = Target.GetLocation();
-
-    // keep a roughly constant apparent size on screen regardless of distance from the camera
-    const float DistanceToCamera = glm::length(CameraLocation - TargetLocation);
-    const float GizmoScale = DistanceToCamera * 0.15f;
+    const float GizmoScale = ComputeScale(CameraLocation, TargetLocation);
 
     const glm::mat4 ModelMatrix = glm::translate(glm::mat4(1.0f), TargetLocation) * glm::scale(glm::mat4(1.0f), glm::vec3(GizmoScale));
 
@@ -296,36 +355,118 @@ void TransformGizmo::Draw(const Transform& Target, const glm::vec3& CameraLocati
 
 void TransformGizmo::ApplyTransformDelta(Transform& Target, EGizmoAxis Axis, float Delta) const
 {
+    ApplyTransformDeltaAlongDirection(Target, GetAxisDirection(Axis), Delta);
+}
+
+void TransformGizmo::ApplyTransformDeltaAlongDirection(Transform& Target, const glm::vec3& Direction, float Delta) const
+{
     switch (Mode)
     {
         case EGizmoMode::Translate:
-            ApplyTranslationDelta(Target, Axis, Delta);
+            ApplyTranslationDelta(Target, Direction, Delta);
             break;
         case EGizmoMode::Rotate:
-            ApplyRotationDelta(Target, Axis, Delta);
+            ApplyRotationDelta(Target, Direction, Delta);
             break;
         case EGizmoMode::Scale:
-            ApplyScaleDelta(Target, Axis, Delta);
+            ApplyScaleDelta(Target, Direction, Delta);
             break;
     }
 }
 
-void TransformGizmo::ApplyTranslationDelta(Transform& Target, EGizmoAxis Axis, float Delta) const
+void TransformGizmo::ApplyTranslationDelta(Transform& Target, const glm::vec3& Direction, float Delta) const
 {
-    // TODO: once handle picking exists, translate Target along the world-space Axis by Delta,
-    // e.g. Target.AddTranslation(AxisDirection(Axis) * Delta);
+    Target.AddTranslation(Direction * Delta);
 }
 
-void TransformGizmo::ApplyRotationDelta(Transform& Target, EGizmoAxis Axis, float Delta) const
+void TransformGizmo::ApplyRotationDelta(Transform& Target, const glm::vec3& Direction, float Delta) const
 {
-    // TODO: once handle picking exists, rotate Target around the world-space Axis by Delta degrees,
-    // e.g. Target.RotateWorld(AxisDirection(Axis), Delta);
+    // RotateLocal (not RotateWorld) - RotateWorld also orbits Translation around the coordinate
+    // origin (correct for e.g. camera orbit, wrong here); a gizmo should spin Target in place
+    // around its own position. Both already treat Direction as a world-space axis; "Local" here
+    // refers to the pivot being Target's own origin, not the axis's frame.
+    Target.RotateLocal(Direction, Delta);
 }
 
-void TransformGizmo::ApplyScaleDelta(Transform& Target, EGizmoAxis Axis, float Delta) const
+void TransformGizmo::ApplyScaleDelta(Transform& Target, const glm::vec3& Direction, float Delta) const
 {
-    // TODO: once handle picking exists, add Delta to Target's scale component along Axis,
-    // e.g. Target.SetScale(Target.GetScale() + AxisDirection(Axis) * Delta);
+    Target.SetScale(Target.GetScale() + Direction * Delta);
+}
+
+glm::vec3 TransformGizmo::GetAxisDirection(EGizmoAxis Axis)
+{
+    return AxisDirection(AxisEnumToIndex(Axis));
+}
+
+float TransformGizmo::ComputeScale(const glm::vec3& CameraLocation, const glm::vec3& TargetLocation)
+{
+    // keep a roughly constant apparent size on screen regardless of distance from the camera
+    const float DistanceToCamera = glm::length(CameraLocation - TargetLocation);
+    return DistanceToCamera * 0.15f;
+}
+
+EGizmoAxis TransformGizmo::PickAxis(const glm::vec3& RayOrigin, const glm::vec3& RayDirection, const glm::vec3& TargetLocation, float GizmoScale) const
+{
+    if (Mode == EGizmoMode::Rotate)
+    {
+        return PickRotateAxis(RayOrigin, RayDirection, TargetLocation, GizmoScale);
+    }
+    return PickLinearAxis(RayOrigin, RayDirection, TargetLocation, GizmoScale);
+}
+
+EGizmoAxis TransformGizmo::PickLinearAxis(const glm::vec3& RayOrigin, const glm::vec3& RayDirection, const glm::vec3& TargetLocation, float GizmoScale) const
+{
+    const float HandleLength = (Mode == EGizmoMode::Translate ? (TranslateShaftLength + TranslateHeadLength) : ScaleShaftLength) * GizmoScale;
+    constexpr float HitRadiusFactor = 0.14f;
+
+    EGizmoAxis Best = EGizmoAxis::None;
+    float BestDistance = HitRadiusFactor * GizmoScale;
+
+    for (int Axis = 0; Axis < 3; ++Axis)
+    {
+        const float Distance = ClosestDistanceRaySegment(RayOrigin, RayDirection, TargetLocation, AxisDirection(Axis), HandleLength);
+        if (Distance < BestDistance)
+        {
+            BestDistance = Distance;
+            Best = IndexToAxisEnum(Axis);
+        }
+    }
+    return Best;
+}
+
+EGizmoAxis TransformGizmo::PickRotateAxis(const glm::vec3& RayOrigin, const glm::vec3& RayDirection, const glm::vec3& TargetLocation, float GizmoScale) const
+{
+    constexpr float RingHitToleranceFactor = 0.12f;
+
+    EGizmoAxis Best = EGizmoAxis::None;
+    float BestDeviation = RingHitToleranceFactor * GizmoScale;
+
+    for (int Axis = 0; Axis < 3; ++Axis)
+    {
+        const glm::vec3 PlaneNormal = AxisDirection(Axis);
+        const float Denom = glm::dot(RayDirection, PlaneNormal);
+        if (std::abs(Denom) < 1e-5f)
+        {
+            continue; // ray parallel to this ring's plane
+        }
+
+        const float T = glm::dot(TargetLocation - RayOrigin, PlaneNormal) / Denom;
+        if (T < 0.0f)
+        {
+            continue; // plane intersection is behind the camera
+        }
+
+        const glm::vec3 HitPoint = RayOrigin + RayDirection * T;
+        const float RadiusAtHit = glm::length(HitPoint - TargetLocation);
+        const float Deviation = std::abs(RadiusAtHit - RotateRingRadius * GizmoScale);
+
+        if (Deviation < BestDeviation)
+        {
+            BestDeviation = Deviation;
+            Best = IndexToAxisEnum(Axis);
+        }
+    }
+    return Best;
 }
 
 GLuint TransformGizmo::GetShaderID() const

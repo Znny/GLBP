@@ -11,9 +11,11 @@ layout(std140) uniform FrameConstants
     float Time;
 };
 
+uniform mat4 Model;
+
 out vec2 uv;
 void main()
 {
     uv = vertexUV;
-    gl_Position = ViewProjectionMatrix * vec4(vertexPosition, 1.0);
+    gl_Position = ViewProjectionMatrix * Model * vec4(vertexPosition, 1.0);
 };

@@ -20,10 +20,12 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cmath>
+#include <cassert>
 #include <string>
 #include <memory>
 #include <vector>
 #include <array>
+#include <algorithm>
 
 #include "ShaderProgram.h"
 #include "ShaderObject.h"
@@ -37,6 +39,7 @@
 #include "UniformBuffer.h"
 #include "FrameConstants.h"
 #include "Camera.h"
+#include "SceneGraph.h"
 #include "Gizmo.h"
 #include "Grid.h"
 #include "SSTextRenderer.h"
@@ -69,6 +72,9 @@ void MouseButtonEventCallback(GLFWwindow* Window, int Button, int Action, int Mo
 void CursorPositionEventCallback(GLFWwindow* Window, double XPos, double YPos);
 void ScrollEventCallback(GLFWwindow* Window, double XOffset, double YOffset);
 int GetViewportIndexAtCursor(double CursorX, double CursorY);
+void GetPerspectiveViewportRect(int& OutX, int& OutY, int& OutW, int& OutH);
+void ScreenPointToWorldRay(double CursorX, double CursorY, Camera& Cam, int RectX, int RectY, int RectW, int RectH, glm::vec3& OutRayOrigin, glm::vec3& OutRayDirection);
+bool ProjectWorldToScreen(const glm::vec3& WorldPoint, const glm::mat4& ViewProjectionMatrix, int RectX, int RectY, int RectW, int RectH, glm::vec2& OutPixel);
 void WindowResizeEventCallback(GLFWwindow* Window, int NewWidth, int NewHeight);
 
 void ErrorCallback(int error, const char* description);
@@ -77,7 +83,7 @@ void Cleanup();
 
 Rendering::FMeshData GenerateTetrahedronMeshData();
 Rendering::FMeshData GenerateHexTorusMeshData(float InnerRadius, float OuterRadius, int SideCount, float HalfDepth);
-Rendering::FMeshData GenerateTexturedCubeMeshData(float HalfSize, float OffsetX);
+Rendering::FMeshData GenerateTexturedCubeMeshData(float HalfSize);
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //main window for the sim
@@ -163,6 +169,10 @@ SSTextRenderer TextRenderer;
 //perspective camera rendering fullscreen. Toggled by Space (KeyboardEventCallback).
 static bool bMultiViewMode = false;
 
+//vsync state, toggled by F7 (KeyboardEventCallback) - matches the glfwSwapInterval(1) set at
+//startup in InitGraphics()
+static bool bVsyncEnabled = true;
+
 //camera fly controls (active only while the right mouse button is held, mirroring most editors)
 static bool bRightMouseHeld = false;
 static bool bFirstCursorSample = true;
@@ -184,6 +194,12 @@ static int ActiveMouseViewport = -1;
 static bool bGlideActive = false;
 static bool bYZPanActive = false;
 
+//gizmo drag state - LMB press checks for a gizmo-axis hit before falling back to bGlideActive
+//above, so a drag on a handle takes priority over camera glide (perspective-viewport only, same
+//scoping as bGlideActive/bYZPanActive)
+static bool bGizmoDragActive = false;
+static EGizmoAxis GizmoDragAxis = EGizmoAxis::None;
+
 //timing
 static double LastFrameTime = 0;
 static double ThisFrameTime = 0;
@@ -191,6 +207,14 @@ static double LastTimingUpdateTime = 0;
 static double DeltaTime = 0.0;
 static unsigned int FrameCount = 0;
 static unsigned int LastTimingUpdateFrame = 0;
+
+//rolling frametime average - updated every frame (unlike the once-a-second FPS counter above),
+//via a fixed-size circular buffer + running sum so the per-frame cost stays O(1)
+constexpr int FrametimeWindowSize = 120; //~2s at 60fps - tune via this one constant
+static double FrametimeWindow[FrametimeWindowSize] = {};
+static int FrametimeWindowIndex = 0;
+static int FrametimeWindowCount = 0;
+static double FrametimeWindowSum = 0.0;
 
 static bool bUsingWSL = false;
 
@@ -242,6 +266,21 @@ Rendering::ShaderManager* shaderManager;
 std::shared_ptr<Rendering::ShaderProgram> PassthroughShaderProgram;
 std::shared_ptr<Rendering::ShaderProgram> TexturedShaderProgram;
 
+//scene hierarchy for the render objects below - see SceneGraph.h for the handle/depth-bucket design
+SceneGraph MainSceneGraph;
+NodeHandle TetrahedronNode;
+NodeHandle HexTorusNode;
+NodeHandle TexturedCubeNode;
+
+//which scene node (if any) the gizmo currently targets - invalid handle means nothing selected
+NodeHandle SelectedNode;
+
+//the one place SelectedNode actually changes, called directly from the "Scene" ImGui panel
+void SelectNode(NodeHandle Handle)
+{
+    SelectedNode = Handle;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 int main(int argc, char** argv, char** envp)
@@ -259,12 +298,53 @@ int main(int argc, char** argv, char** envp)
     return 0;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//TEMPORARY smoke test for SceneGraph - exercises handle validity, depth tracking, world-matrix
+//composition, reparenting, and stale-handle detection after slot reuse, against a throwaway
+//graph (not MainSceneGraph). No GL context needed, so it runs before InitGraphics(). Delete once
+//eyeballed - this stands in for a real test framework, which the project doesn't have yet.
+void SceneGraphSmokeTest()
+{
+    SceneGraph TestGraph;
+
+    const NodeHandle A = TestGraph.CreateNode();
+    const NodeHandle B = TestGraph.CreateNode(A);
+    const NodeHandle C = TestGraph.CreateNode(B);
+    assert(TestGraph.GetNode(A)->GetDepth() == 0);
+    assert(TestGraph.GetNode(B)->GetDepth() == 1);
+    assert(TestGraph.GetNode(C)->GetDepth() == 2);
+
+    TestGraph.GetLocalTransform(A).SetTranslation(glm::vec3(1.0f, 0.0f, 0.0f));
+    TestGraph.UpdateWorldTransforms();
+    assert(glm::vec3(TestGraph.GetWorldMatrix(B)[3]) == glm::vec3(1.0f, 0.0f, 0.0f));
+    assert(glm::vec3(TestGraph.GetWorldMatrix(C)[3]) == glm::vec3(1.0f, 0.0f, 0.0f));
+
+    TestGraph.Reparent(C, {});
+    TestGraph.UpdateWorldTransforms();
+    assert(TestGraph.GetNode(C)->GetDepth() == 0);
+    assert(glm::vec3(TestGraph.GetWorldMatrix(C)[3]) == glm::vec3(0.0f, 0.0f, 0.0f));
+
+    TestGraph.DestroyNode(B);
+    const auto& RemainingChildrenOfA = TestGraph.GetNode(A)->GetChildren();
+    assert(std::find(RemainingChildrenOfA.begin(), RemainingChildrenOfA.end(), B) == RemainingChildrenOfA.end());
+
+    //D reuses B's freed slot index - the old handle to B must still read as invalid despite that,
+    //since B's slot generation was bumped on destruction and D's handle carries the new generation
+    const NodeHandle D = TestGraph.CreateNode();
+    assert(!TestGraph.IsValid(B));
+    assert(TestGraph.IsValid(D));
+
+    LogInfo("SceneGraph smoke test passed.\n");
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /// initialization functions
 bool Init(int argc, char** argv, char** envp)
 {
     setvbuf(stdout, nullptr, _IOLBF, 0);   // line-buffered regardless of TTY detection
     // or _IONBF for fully unbuffered, like stderr
     LogInfo("initializing...\n");
+
+    SceneGraphSmokeTest();
 
     const char* WSLIndicatorStrings[3] =
     {
@@ -395,7 +475,7 @@ Rendering::FMeshData GenerateHexTorusMeshData(float InnerRadius, float OuterRadi
 //each face gets its own full 0..1 UV range - sharing corners across faces would need ambiguous
 //per-vertex UVs, since a cube corner is part of 3 differently-UV'd faces. Corner order per face is
 //CCW as seen from outside (verified by hand via cross product against each face's own normal).
-Rendering::FMeshData GenerateTexturedCubeMeshData(float HalfSize, float OffsetX)
+Rendering::FMeshData GenerateTexturedCubeMeshData(float HalfSize)
 {
     struct FCubeFace { glm::vec3 Corners[4]; };
     const FCubeFace CubeFaces[6] =
@@ -415,7 +495,7 @@ Rendering::FMeshData GenerateTexturedCubeMeshData(float HalfSize, float OffsetX)
         for(int Corner = 0; Corner < 4; Corner++)
         {
             const glm::vec3& C = CubeFaces[Face].Corners[Corner];
-            MeshData.Positions.push_back({OffsetX + C.x * HalfSize, C.y * HalfSize, C.z * HalfSize});
+            MeshData.Positions.push_back({C.x * HalfSize, C.y * HalfSize, C.z * HalfSize});
             MeshData.UVs.push_back(FaceUVs[Corner]);
         }
         const GLuint Base = (GLuint)(Face * 4);
@@ -474,6 +554,7 @@ bool InitGraphics()
     /// initialize rendering objects
 
     Tetrahedron = Rendering::UploadMesh(GenerateTetrahedronMeshData());
+    TetrahedronNode = MainSceneGraph.CreateNode();
 
     //hexagonal torus surrounding the tetrahedron above, built with VertexBuffer/IndexBuffer/VertexArray,
     //same as the tetrahedron. Extruded along Z into a solid hex-nut-shaped torus (front/back faces +
@@ -488,6 +569,10 @@ bool InitGraphics()
         constexpr float HalfDepth = 0.5f; //full depth 1.0, matching the ring's radial width (Outer-Inner)
 
         HexTorus = Rendering::UploadMesh(GenerateHexTorusMeshData(InnerRadius, OuterRadius, SideCount, HalfDepth));
+
+        //parented to the tetrahedron - the torus visually surrounds it, so this demonstrates the
+        //hierarchy meaningfully: rotating the tetrahedron below carries the torus along with it
+        HexTorusNode = MainSceneGraph.CreateNode(TetrahedronNode);
     }
 
     //textured cube off to the side of the tetrahedron/hex-torus, proving out Texture2D - same
@@ -519,7 +604,12 @@ bool InitGraphics()
         constexpr float CubeHalfSize = 0.6f;
         constexpr float CubeOffsetX = 5.7f;
 
-        TexturedCube = Rendering::UploadMesh(GenerateTexturedCubeMeshData(CubeHalfSize, CubeOffsetX));
+        TexturedCube = Rendering::UploadMesh(GenerateTexturedCubeMeshData(CubeHalfSize));
+
+        //independent root node - cube's offset now lives on its local transform rather than
+        //baked into its mesh data
+        TexturedCubeNode = MainSceneGraph.CreateNode(TetrahedronNode);
+        MainSceneGraph.GetLocalTransform(TexturedCubeNode).SetTranslation(glm::vec3(CubeOffsetX, 0.0f, 0.0f));
     }
 
     //setup the camera: perspective projection matching the window, positioned back from the origin and looking at it
@@ -720,6 +810,8 @@ void Tick(double dt)
 
     FrameConstants.CursorPosition = glm::vec2((float)CursorX, (float)CursorY);
     FrameConstants.Time = (float)ThisFrameTime;
+
+    MainSceneGraph.UpdateWorldTransforms();
 }
 
 void Render(double dt)
@@ -731,6 +823,15 @@ void Render(double dt)
 
     //smoke test for the ImGui integration - gets replaced by real tool panels (shader playground, etc.) later
     ImGui::ShowDemoWindow();
+
+    //picks which scene node (if any) the gizmo targets - each button calls SelectNode directly,
+    //so there's no intermediate index/state that has to stay in sync with SelectedNode
+    ImGui::Begin("Scene");
+    if(ImGui::Button("None")) SelectNode({});
+    ImGui::SameLine(); if(ImGui::Button("Tetrahedron")) SelectNode(TetrahedronNode);
+    ImGui::SameLine(); if(ImGui::Button("HexTorus")) SelectNode(HexTorusNode);
+    ImGui::SameLine(); if(ImGui::Button("TexturedCube")) SelectNode(TexturedCubeNode);
+    ImGui::End();
 
     const double Red = 0.0f;//cos(ThisFrameTime);
     const double Green = 0.0f;//cos(ThisFrameTime);
@@ -793,6 +894,8 @@ void Render(double dt)
         glUseProgram(PassthroughShaderProgram->GetProgramID());
         if(Tetrahedron)
         {
+            const glm::mat4 Model = MainSceneGraph.GetWorldMatrix(TetrahedronNode);
+            glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->GetProgramID(), "Model"), 1, GL_FALSE, &Model[0][0]);
             Tetrahedron->Draw(GL_TRIANGLES);
         }
 
@@ -800,6 +903,8 @@ void Render(double dt)
         //same VertexBuffer/IndexBuffer/VertexArray classes as the tetrahedron above
         if(HexTorus)
         {
+            const glm::mat4 Model = MainSceneGraph.GetWorldMatrix(HexTorusNode);
+            glUniformMatrix4fv(glGetUniformLocation(PassthroughShaderProgram->GetProgramID(), "Model"), 1, GL_FALSE, &Model[0][0]);
             HexTorus->Draw(GL_TRIANGLES);
         }
 
@@ -808,6 +913,8 @@ void Render(double dt)
         {
             glUseProgram(TexturedShaderProgram->GetProgramID());
             glUniform1i(glGetUniformLocation(TexturedShaderProgram->GetProgramID(), "TexSampler"), 0);
+            const glm::mat4 Model = MainSceneGraph.GetWorldMatrix(TexturedCubeNode);
+            glUniformMatrix4fv(glGetUniformLocation(TexturedShaderProgram->GetProgramID(), "Model"), 1, GL_FALSE, &Model[0][0]);
             CheckerTexture->Bind(0);
             TexturedCube->Draw(GL_TRIANGLES);
         }
@@ -818,8 +925,17 @@ void Render(double dt)
         ViewportGrid.Draw(VP.ViewportCamera, VP.GridTangent, VP.GridBitangent);
 
         //gizmo stays perspective-only - drawn here (not after the loop) so it's naturally
-        //confined to the perspective viewport's own rect/scissor in multi-view mode too
-        Gizmo.Draw(GizmoTargetTransform, VP.ViewportCamera.GetLocation());
+        //confined to the perspective viewport's own rect/scissor in multi-view mode too. Synced
+        //each frame from SelectedNode's *resolved world* position/rotation (not its bare local
+        //transform, which for a child like HexTorus wouldn't reflect where it actually is) -
+        //rotation isn't consumed by Draw() yet but is threaded through for a future world-space-
+        //vs-local-space gizmo toggle.
+        if(SelectedNode.IsValid())
+        {
+            GizmoTargetTransform.SetTranslation(glm::vec3(MainSceneGraph.GetWorldMatrix(SelectedNode)[3]));
+            GizmoTargetTransform.SetRotation(MainSceneGraph.GetWorldRotation(SelectedNode));
+            Gizmo.Draw(GizmoTargetTransform, VP.ViewportCamera.GetLocation());
+        }
 
         if(VP.ViewportFramebuffer)
         {
@@ -937,6 +1053,13 @@ void ErrorCallback(int error, const char *description)
     LogError("glfwError %X: %s\n", error, description);
 }
 
+void ToggleVsync()
+{
+    bVsyncEnabled = !bVsyncEnabled;
+    glfwSwapInterval(bVsyncEnabled ? 1 : 0);
+    LogInfo("vsync %s\n", bVsyncEnabled ? "enabled" : "disabled");
+}
+
 void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Action, int Modifiers)
 {
     //don't let gizmo/camera hotkeys fire while an ImGui widget (e.g. a text field) wants the keyboard
@@ -969,6 +1092,12 @@ void KeyboardEventCallback(GLFWwindow *Window, int KeyCode, int ScanCode, int Ac
     if(KeyCode == GLFW_KEY_SPACE)
     {
         bMultiViewMode = !bMultiViewMode;
+        return;
+    }
+
+    if(KeyCode == GLFW_KEY_F7)
+    {
+        ToggleVsync();
         return;
     }
 
@@ -1018,6 +1147,58 @@ int GetViewportIndexAtCursor(double CursorX, double CursorY)
     return -1;
 }
 
+//the perspective viewport's current on-screen rect, in the same bottom-left-origin convention as
+//glViewport/glScissor - matches the RectX/Y/W/H computation already duplicated at each per-viewport
+//draw site (e.g. in Render()), just for the two gizmo-picking call sites below, which sit outside
+//that per-viewport loop
+void GetPerspectiveViewportRect(int& OutX, int& OutY, int& OutW, int& OutH)
+{
+    const FViewport& VP = Viewports[Viewport_Perspective];
+    OutX = bMultiViewMode ? VP.QuadrantX : 0;
+    OutY = bMultiViewMode ? VP.QuadrantY : 0;
+    OutW = bMultiViewMode ? VP.QuadrantWidth : Width;
+    OutH = bMultiViewMode ? VP.QuadrantHeight : Height;
+}
+
+//unprojects a cursor pixel (GLFW convention: top-left origin, Y down) into a world-space ray,
+//via the near/far NDC points through the inverse view-projection matrix - works uniformly for
+//perspective and ortho cameras, though only the perspective viewport calls this today (gizmo
+//interaction is scoped there, matching the existing camera controls)
+void ScreenPointToWorldRay(double CursorX, double CursorY, Camera& Cam, int RectX, int RectY, int RectW, int RectH, glm::vec3& OutRayOrigin, glm::vec3& OutRayDirection)
+{
+    const double FlippedY = (double)Height - CursorY; //bottom-left-origin, matches RectY's convention
+    const float NdcX = 2.0f * (float)(CursorX - RectX) / (float)RectW - 1.0f;
+    const float NdcY = 2.0f * (float)(FlippedY - RectY) / (float)RectH - 1.0f;
+
+    const glm::mat4 InvViewProjection = glm::inverse(Cam.GetViewProjectionMatrix());
+    glm::vec4 NearPoint = InvViewProjection * glm::vec4(NdcX, NdcY, -1.0f, 1.0f);
+    glm::vec4 FarPoint = InvViewProjection * glm::vec4(NdcX, NdcY, 1.0f, 1.0f);
+    NearPoint /= NearPoint.w;
+    FarPoint /= FarPoint.w;
+
+    OutRayOrigin = glm::vec3(NearPoint);
+    OutRayDirection = glm::normalize(glm::vec3(FarPoint - NearPoint));
+}
+
+//inverse of the above: projects a world point to a window pixel (GLFW convention), used to turn a
+//world-space axis/ring into a 2D screen direction for interpreting mouse drag deltas. Returns
+//false (leaving OutPixel untouched) if the point projects behind the camera.
+bool ProjectWorldToScreen(const glm::vec3& WorldPoint, const glm::mat4& ViewProjectionMatrix, int RectX, int RectY, int RectW, int RectH, glm::vec2& OutPixel)
+{
+    const glm::vec4 Clip = ViewProjectionMatrix * glm::vec4(WorldPoint, 1.0f);
+    if(Clip.w <= 1e-4f)
+    {
+        return false;
+    }
+
+    const glm::vec3 Ndc = glm::vec3(Clip) / Clip.w;
+    const float PixelXInRect = (Ndc.x * 0.5f + 0.5f) * (float)RectW;
+    const float PixelYBottomUp = (Ndc.y * 0.5f + 0.5f) * (float)RectH;
+    OutPixel.x = (float)RectX + PixelXInRect;
+    OutPixel.y = (float)Height - ((float)RectY + PixelYBottomUp); //flip to GLFW's top-left/Y-down convention
+    return true;
+}
+
 void MouseButtonEventCallback(GLFWwindow *Window, int Button, int Action, int Modifiers)
 {
     //don't start camera-fly/pan from a click ImGui already claimed (e.g. on a panel/widget)
@@ -1058,21 +1239,53 @@ void MouseButtonEventCallback(GLFWwindow *Window, int Button, int Action, int Mo
     else if(Button == GLFW_MOUSE_BUTTON_LEFT)
     {
         //LMB "glide" is perspective-only (see GetViewportIndexAtCursor for the single-view-mode/
-        //quadrant hit-test) - a press elsewhere (an ortho quadrant, or the border gap) is just ignored
+        //quadrant hit-test) - a press elsewhere (an ortho quadrant, or the border gap) is just ignored.
+        //A press that hits a gizmo handle starts a gizmo drag instead of glide.
         if(Action == GLFW_PRESS)
         {
             double CursorX, CursorY;
             glfwGetCursorPos(Window, &CursorX, &CursorY);
-            bGlideActive = (GetViewportIndexAtCursor(CursorX, CursorY) == Viewport_Perspective);
-            if(bGlideActive)
+            const bool bInPerspectiveViewport = (GetViewportIndexAtCursor(CursorX, CursorY) == Viewport_Perspective);
+
+            bGizmoDragActive = false;
+            if(bInPerspectiveViewport && SelectedNode.IsValid())
             {
-                //FPS-style hidden/locked cursor, same as RMB fly - glide's horizontal axis is a yaw look
-                if(!bUsingWSL)
+                int RectX, RectY, RectW, RectH;
+                GetPerspectiveViewportRect(RectX, RectY, RectW, RectH);
+
+                glm::vec3 RayOrigin, RayDirection;
+                ScreenPointToWorldRay(CursorX, CursorY, MainCamera, RectX, RectY, RectW, RectH, RayOrigin, RayDirection);
+
+                const glm::vec3 TargetLocation = glm::vec3(MainSceneGraph.GetWorldMatrix(SelectedNode)[3]);
+                const float GizmoScale = TransformGizmo::ComputeScale(MainCamera.GetLocation(), TargetLocation);
+                const EGizmoAxis PickedAxis = Gizmo.PickAxis(RayOrigin, RayDirection, TargetLocation, GizmoScale);
+
+                if(PickedAxis != EGizmoAxis::None)
                 {
-                    glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                    bGizmoDragActive = true;
+                    GizmoDragAxis = PickedAxis;
+                    bFirstCursorSample = true;
                 }
-                bFirstCursorSample = true;
             }
+
+            if(!bGizmoDragActive)
+            {
+                bGlideActive = bInPerspectiveViewport;
+                if(bGlideActive)
+                {
+                    //FPS-style hidden/locked cursor, same as RMB fly - glide's horizontal axis is a yaw look
+                    if(!bUsingWSL)
+                    {
+                        glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                    }
+                    bFirstCursorSample = true;
+                }
+            }
+        }
+        else if(bGizmoDragActive)
+        {
+            bGizmoDragActive = false;
+            GizmoDragAxis = EGizmoAxis::None;
         }
         else if(bGlideActive)
         {
@@ -1120,7 +1333,7 @@ void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
     }
 
     const bool bRightDragActive = bRightMouseHeld && ActiveMouseViewport >= 0;
-    if(!bRightDragActive && !bGlideActive && !bYZPanActive)
+    if(!bRightDragActive && !bGlideActive && !bYZPanActive && !bGizmoDragActive)
     {
         return;
     }
@@ -1136,8 +1349,81 @@ void CursorPositionEventCallback(GLFWwindow *Window, double XPos, double YPos)
 
     const double DeltaX = XPos - LastCursorX;
     const double DeltaY = YPos - LastCursorY;
+    const double OldCursorX = LastCursorX;
+    const double OldCursorY = LastCursorY;
     LastCursorX = XPos;
     LastCursorY = YPos;
+
+    if(bGizmoDragActive)
+    {
+        int RectX, RectY, RectW, RectH;
+        GetPerspectiveViewportRect(RectX, RectY, RectW, RectH);
+
+        const glm::mat4 ViewProjectionMatrix = MainCamera.GetViewProjectionMatrix();
+        const glm::vec3 TargetLocation = glm::vec3(MainSceneGraph.GetWorldMatrix(SelectedNode)[3]);
+        const glm::vec3 WorldAxisDirection = TransformGizmo::GetAxisDirection(GizmoDragAxis);
+
+        float Delta = 0.0f;
+        if(Gizmo.GetMode() == EGizmoMode::Rotate)
+        {
+            //angle-around-the-projected-center approach: the change in the cursor's angle around
+            //TargetLocation's 2D screen position, in degrees, normalized to avoid an atan2 wraparound
+            //jump. Note: whether a given drag direction reads as clockwise-positive or negative
+            //depends on which side of the ring the camera is viewing from - an accepted
+            //simplification of this approach.
+            glm::vec2 ScreenCenter;
+            if(ProjectWorldToScreen(TargetLocation, ViewProjectionMatrix, RectX, RectY, RectW, RectH, ScreenCenter))
+            {
+                const double PrevAngle = atan2(OldCursorY - ScreenCenter.y, OldCursorX - ScreenCenter.x);
+                const double NewAngle = atan2(YPos - ScreenCenter.y, XPos - ScreenCenter.x);
+                double DeltaAngleDegrees = -glm::degrees(NewAngle - PrevAngle);
+                if(DeltaAngleDegrees > 180.0) DeltaAngleDegrees -= 360.0;
+                if(DeltaAngleDegrees < -180.0) DeltaAngleDegrees += 360.0;
+
+                Delta = (float)DeltaAngleDegrees;
+            }
+        }
+        else
+        {
+            //project the axis to screen space and take how far the mouse moved along that 2D
+            //direction, so dragging "along" the drawn handle (whichever way it points on screen)
+            //moves/scales the object, regardless of camera angle
+            glm::vec2 ScreenOrigin, ScreenAxisTip;
+            if(ProjectWorldToScreen(TargetLocation, ViewProjectionMatrix, RectX, RectY, RectW, RectH, ScreenOrigin) &&
+               ProjectWorldToScreen(TargetLocation + WorldAxisDirection, ViewProjectionMatrix, RectX, RectY, RectW, RectH, ScreenAxisTip) &&
+               ScreenAxisTip != ScreenOrigin)
+            {
+                const glm::vec2 ScreenAxisDirection = glm::normalize(ScreenAxisTip - ScreenOrigin);
+                const glm::vec2 PixelDelta((float)DeltaX, (float)DeltaY);
+                const float PixelsAlongAxis = glm::dot(PixelDelta, ScreenAxisDirection);
+                constexpr float TranslateSensitivity = 0.01f; //world units per pixel-along-axis
+                constexpr float ScaleSensitivity = 0.01f;
+                Delta = PixelsAlongAxis * (Gizmo.GetMode() == EGizmoMode::Translate ? TranslateSensitivity : ScaleSensitivity);
+            }
+        }
+
+        //Translate/Rotate deltas are computed in world space above but must be applied in the
+        //target's own local space - for a root node local==world so Direction passes through
+        //unchanged, but for a parented node (e.g. HexTorus) it needs converting into the parent's
+        //frame first. Scale is always expressed in the target's own local axes regardless of
+        //parent, so it never needs this conversion.
+        glm::vec3 Direction = WorldAxisDirection;
+        const NodeHandle ParentHandle = MainSceneGraph.GetNode(SelectedNode)->GetParent();
+        if(ParentHandle.IsValid())
+        {
+            if(Gizmo.GetMode() == EGizmoMode::Translate)
+            {
+                Direction = glm::vec3(glm::inverse(MainSceneGraph.GetWorldMatrix(ParentHandle)) * glm::vec4(WorldAxisDirection, 0.0f));
+            }
+            else if(Gizmo.GetMode() == EGizmoMode::Rotate)
+            {
+                Direction = glm::inverse(MainSceneGraph.GetWorldRotation(ParentHandle)) * WorldAxisDirection;
+            }
+        }
+
+        Gizmo.ApplyTransformDeltaAlongDirection(MainSceneGraph.GetLocalTransform(SelectedNode), Direction, Delta);
+        return;
+    }
 
     if(bGlideActive)
     {
@@ -1445,6 +1731,17 @@ void UpdateTiming(GLFWwindow* window)
     DeltaTime = (ThisFrameTime = glfwGetTime()) - LastFrameTime;
     LastFrameTime = ThisFrameTime;
 
+    //rolling frametime average - updated every frame regardless of the once-a-second window
+    //below, via a running sum so this stays O(1) rather than re-summing the whole buffer
+    FrametimeWindowSum -= FrametimeWindow[FrametimeWindowIndex];
+    FrametimeWindow[FrametimeWindowIndex] = DeltaTime;
+    FrametimeWindowSum += DeltaTime;
+    FrametimeWindowIndex = (FrametimeWindowIndex + 1) % FrametimeWindowSize;
+    if(FrametimeWindowCount < FrametimeWindowSize)
+    {
+        FrametimeWindowCount++;
+    }
+
     //update timing counter in the window, 4 times a second
     double TimeSinceLastUpdate = ThisFrameTime - LastTimingUpdateTime;
     if (TimeSinceLastUpdate >= 1.0)
@@ -1452,8 +1749,9 @@ void UpdateTiming(GLFWwindow* window)
         LastTimingUpdateTime = ThisFrameTime;
         LastTimingUpdateFrame = FrameCount;
         double fps = (double)FrameCount / TimeSinceLastUpdate;
-        char tmp[128];
-        sprintf(tmp, "opengl @ fps: %.2f", fps);
+        const double AvgFrametimeMs = (FrametimeWindowSum / FrametimeWindowCount) * 1000.0;
+        char tmp[160];
+        sprintf(tmp, "opengl @ fps: %.2f | avg frametime (last %d frames): %.3f ms", fps, FrametimeWindowCount, AvgFrametimeMs);
         glfwSetWindowTitle(window, tmp);
         FrameCount = 0;
     }

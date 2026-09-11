@@ -59,6 +59,8 @@ add_executable(GLBP
         src/ShaderProgram.cpp
         src/ShaderManager.cpp
         src/Transform.cpp
+        src/SceneGraph.cpp
+        src/SceneGraph.h
         src/Camera.cpp
         src/Gizmo.cpp
         src/Grid.cpp
