@@ -7,8 +7,7 @@
 #include <string>
 #include <vector>
 
-typedef unsigned int GLenum;
-typedef unsigned int GLuint;
+#include "glTypes.h"
 
 namespace Rendering
 {
@@ -43,6 +42,3 @@ namespace Rendering
         bool bCompiled = false;
     };
 }
-
-#undef GLuint
-#undef GLenum

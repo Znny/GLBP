@@ -4,7 +4,7 @@
 #include "glad/glad.h"
 #include <iostream>
 
-#include "myc/paths/paths.h"
+#include "gear/paths/paths.h"
 
 // Initialize the static singleton instance
 Rendering::ShaderManager* Rendering::ShaderManager::sShaderManager = nullptr;
@@ -59,7 +59,7 @@ namespace Rendering {
             return ShaderPrograms[ProgramName];
         }
 
-        std::string ExecutablePath = myc::GetExecutableDir();
+        std::string ExecutablePath = gear::GetExecutableDir();
         // Retrieve or create the vertex and fragment shaders
         auto vertexShader = LoadShader(ExecutablePath + VertexShaderName, GL_VERTEX_SHADER);
         auto fragmentShader = LoadShader(ExecutablePath + FragmentShaderName, GL_FRAGMENT_SHADER);

@@ -2,7 +2,7 @@
 
 #include <glm/glm.hpp>
 
-typedef unsigned int GLuint;
+#include "glTypes.h"
 
 namespace Rendering
 {

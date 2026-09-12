@@ -8,7 +8,7 @@
 
 #include "ShaderManager.h"
 #include "ShaderProgram.h"
-#include "myc/paths/paths.h"
+#include "gear/paths/paths.h"
 
 SSTextRenderer::~SSTextRenderer()
 {
@@ -28,7 +28,7 @@ SSTextRenderer::~SSTextRenderer()
 
 bool SSTextRenderer::Initialize(const std::string& TTFFilename, float FontPixelHeight)
 {
-    const std::string FullPath = myc::GetExecutableDir() + TTFFilename;
+    const std::string FullPath = gear::GetExecutableDir() + TTFFilename;
 
     FILE* File = fopen(FullPath.c_str(), "rb");
     if (!File)

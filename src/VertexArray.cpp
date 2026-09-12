@@ -2,6 +2,9 @@
 
 #include "glad/glad.h"
 
+#include "VertexBuffer.h"
+#include "IndexBuffer.h"
+
 namespace
 {
     unsigned long long SizeOfGLType(GLenum Type)
@@ -77,14 +80,14 @@ namespace Rendering
         }
 
         VertexCount = (int)(Buffer.GetSizeInBytes() / (unsigned long long)Stride);
-        VertexBuffers.push_back(std::move(Buffer));
+        VertexBuffers.push_back(std::make_unique<VertexBuffer>(std::move(Buffer)));
     }
 
     void VertexArray::SetIndexBuffer(IndexBuffer&& Buffer)
     {
         glBindVertexArray(ArrayID);
         Buffer.Bind();
-        IndexBufferObject = std::move(Buffer);
+        IndexBufferObject = std::make_unique<IndexBuffer>(std::move(Buffer));
     }
 
     void VertexArray::Bind() const
@@ -100,7 +103,7 @@ namespace Rendering
     void VertexArray::Draw(GLenum PrimitiveType) const
     {
         Bind();
-        if(IndexBufferObject.has_value())
+        if(IndexBufferObject)
         {
             glDrawElements(PrimitiveType, (GLsizei)IndexBufferObject->GetCount(), GL_UNSIGNED_INT, nullptr);
         }
@@ -108,5 +111,10 @@ namespace Rendering
         {
             glDrawArrays(PrimitiveType, 0, VertexCount);
         }
+    }
+
+    const IndexBuffer* VertexArray::GetIndexBuffer() const
+    {
+        return IndexBufferObject.get();
     }
 }

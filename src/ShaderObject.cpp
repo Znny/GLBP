@@ -11,7 +11,7 @@
 
 //memory management
 #include <cstring>
-#include "myc/logging/logging.h"
+#include "gear/logging/logging.h"
 #include "ShaderProgram.h"
 
 namespace Rendering {

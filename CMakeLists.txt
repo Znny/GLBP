@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(GLBP)
 
-add_subdirectory(extern/myc)
+add_subdirectory(extern/gear)
 
 set(CMAKE_CXX_STANDARD 17)
 
@@ -14,7 +14,7 @@ include_directories(include/glm/gtc)
 include_directories(include/glm/gtx)
 include_directories(include/glm/simd)
 include_directories(include/KHR)
-include_directories(extern/myc)
+include_directories(extern/gear)
 
 # GLFW headers must match whichever GLFW is actually linked below, or ABI-versioned
 # functions (e.g. glfwGetPlatform(), added in 3.4, used by ImGui's GLFW backend) can
@@ -59,17 +59,28 @@ add_executable(GLBP
         src/ShaderProgram.cpp
         src/ShaderManager.cpp
         src/Transform.cpp
+        src/SceneGraph.cpp
+        src/SceneGraph.h
         src/Camera.cpp
         src/Gizmo.cpp
+        src/Grid.cpp
         src/SSTextRenderer.cpp
         src/stb_truetype_impl.cpp
         src/Texture2D.cpp
-        src/stb_image_impl.cpp)
+        src/Framebuffer.cpp
+        src/stb_image_impl.cpp
+        src/FramebufferAttachment.cpp
+        src/FramebufferAttachment.h
+        src/glTypes.h
+        src/FramebufferAttachment_constants.cpp
+        src/Delegates.h
+        src/MeshData.cpp
+        src/MeshData.h)
 
 set(GLFW_LIB_DIR "${CMAKE_SOURCE_DIR}/lib/lib-mingw-w64")
 
-target_link_libraries(GLBP PRIVATE myc_paths)
-target_link_libraries(GLBP PRIVATE myc_logging)
+target_link_libraries(GLBP PRIVATE gear_paths)
+target_link_libraries(GLBP PRIVATE gear_logging)
 target_link_libraries(GLBP PRIVATE imgui)
 
 if(WIN32)
